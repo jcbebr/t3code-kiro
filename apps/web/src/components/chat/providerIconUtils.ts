@@ -4,12 +4,14 @@ import {
   ClaudeAI,
   CursorIcon,
   GrokIcon,
+  KiroIcon,
   Icon,
   OpenAI,
   OpenCodeIcon,
 } from "../Icons";
 
 export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>> = {
+  [ProviderDriverKind.make("kiro")]: KiroIcon,
   [ProviderDriverKind.make("codex")]: OpenAI,
   [ProviderDriverKind.make("claudeAgent")]: ClaudeAI,
   [ProviderDriverKind.make("opencode")]: OpenCodeIcon,

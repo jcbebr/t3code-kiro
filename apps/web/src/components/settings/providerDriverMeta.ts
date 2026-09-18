@@ -4,6 +4,7 @@ import {
   CodexSettings,
   CursorSettings,
   GrokSettings,
+  KiroSettings,
   OpenCodeSettings,
   ProviderDriverKind,
 } from "@t3tools/contracts";
@@ -13,6 +14,7 @@ import {
   ClaudeAI,
   CursorIcon,
   GrokIcon,
+  KiroIcon,
   type Icon,
   OpenAI,
   OpenCodeIcon,
@@ -44,6 +46,13 @@ export interface ProviderClientDefinition {
 }
 
 const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
+  {
+    value: ProviderDriverKind.make("kiro"),
+    label: "Kiro",
+    icon: KiroIcon,
+    badgeLabel: "Local preview",
+    settingsSchema: KiroSettings,
+  },
   {
     value: ProviderDriverKind.make("codex"),
     label: "Codex",
