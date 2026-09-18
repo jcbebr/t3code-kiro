@@ -44,6 +44,7 @@ export const make = Effect.gen(function* () {
   const electronApp = yield* ElectronApp.ElectronApp;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
+  const userDataContext = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
   const commitHashCache = yield* Ref.make<Option.Option<Option.Option<string>>>(Option.none());
 
   const resolveEmbeddedCommitHash = Effect.gen(function* () {
@@ -85,8 +86,7 @@ export const make = Effect.gen(function* () {
   });
 
   const userDataPath = DesktopUserData.resolveUserDataPath(environment).pipe(
-    Effect.provideService(FileSystem.FileSystem, fileSystem),
-    Effect.provideService(Path.Path, environment.path),
+    Effect.provide(userDataContext),
   );
 
   const configure = Effect.gen(function* () {
