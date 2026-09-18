@@ -112,6 +112,7 @@ function makeTestAdapter(input: {
   readonly failInjectionOnce?: Ref.Ref<boolean>;
   readonly nativeThreadGeneration?: Ref.Ref<number>;
   readonly failResume?: boolean;
+  readonly failResumeOnce?: Ref.Ref<boolean>;
   readonly initialContextUsage?: OrchestrationV2ProviderThread["contextUsage"];
   readonly getModelContextWindow?: (selection: ModelSelection) => number | undefined;
   readonly failedRunOrdinals?: ReadonlySet<number>;
@@ -183,9 +184,15 @@ function makeTestAdapter(input: {
               } satisfies OrchestrationV2ProviderThread;
             }),
           resumeThread: ({ providerThread }) =>
-            input.failResume
-              ? unimplemented(input.driver, "simulated native resume failure")
-              : Effect.succeed(providerThread),
+            Effect.gen(function* () {
+              if (
+                input.failResume ||
+                (input.failResumeOnce !== undefined &&
+                  (yield* Ref.getAndSet(input.failResumeOnce, false)))
+              )
+                return yield* unimplemented(input.driver, "simulated native resume failure");
+              return providerThread;
+            }),
           ...(input.injectedHistory === undefined
             ? {}
             : {
@@ -372,6 +379,14 @@ describe("orchestration v2 provider switching", () => {
     "screenshot-option-change-native",
     "screenshot-model-change-retry-native",
     "screenshot-option-change-retry-native",
+    "prior-images-native",
+    "prior-images-fallback",
+    "imported-prior-images-native",
+    "imported-prior-images-fallback",
+    "prior-images-telemetry-native",
+    "prior-images-unsent-native",
+    "prior-images-replacement-native",
+    "prior-images-legacy-replacement-native",
     "delivery-write-failure",
   ] as const) {
     it.live(`preserves handoffs through ${scenario}`, () =>
@@ -382,8 +397,13 @@ describe("orchestration v2 provider switching", () => {
           const injectedHistory = yield* Ref.make<ReadonlyArray<unknown>>([]);
           const modelScenario = scenario.includes("model") || scenario.includes("option-change");
           const failStartOnce = yield* Ref.make(false);
+          const failResumeOnce = yield* Ref.make(false);
+          const generation = yield* Ref.make(0);
+          const priorImages = scenario.includes("prior-images");
+          const replaceNative = scenario.includes("replacement");
           const capacityScenario = modelScenario || scenario.includes("reported-capacity");
-          const returning = scenario === "large-current-input" || scenario.includes("-change-");
+          const returning =
+            scenario === "large-current-input" || scenario.includes("-change-") || priorImages;
           const targetSelection: ModelSelection = !modelScenario
             ? CLAUDE_MODEL_SELECTION
             : {
@@ -408,7 +428,10 @@ describe("orchestration v2 provider switching", () => {
               modelSelection: CLAUDE_MODEL_SELECTION,
               responseByRunOrdinal: {},
               capturedTurns,
-              ...(scenario.includes("retry") ? { failStartOnce } : {}),
+              ...(scenario.includes("retry") || scenario.includes("unsent")
+                ? { failStartOnce }
+                : {}),
+              ...(replaceNative ? { failResumeOnce, nativeThreadGeneration: generation } : {}),
               ...(scenario.includes("reported-capacity")
                 ? { initialContextUsage: { usedTokens: 999_999, maxTokens: 1_000_000 } }
                 : {}),
@@ -422,7 +445,7 @@ describe("orchestration v2 provider switching", () => {
                         ? 1_000_000
                         : 32_000,
                   }
-                : scenario === "large-current-input"
+                : scenario === "large-current-input" || priorImages
                   ? { getModelContextWindow: () => 32_000 }
                   : {}),
               ...(scenario.endsWith("-native") || scenario === "large-current-input"
@@ -463,7 +486,11 @@ describe("orchestration v2 provider switching", () => {
                 creationSource: "web",
                 text,
                 attachments:
-                  scenario.startsWith("screenshot") && ordinal >= targetOrdinal ? screenshots : [],
+                  scenario.startsWith("screenshot") && ordinal >= targetOrdinal
+                    ? screenshots
+                    : priorImages && ordinal === (scenario.startsWith("imported") ? 1 : 2)
+                      ? [screenshot]
+                      : [],
                 modelSelection: selection,
                 dispatchMode: { type: "start_immediately" },
               });
@@ -523,6 +550,7 @@ describe("orchestration v2 provider switching", () => {
             // First establish the returning native thread: the current request must
             // not be charged as existing context on the subsequent handoff.
             if (returning) {
+              if (scenario.includes("unsent")) yield* Ref.set(failStartOnce, true);
               yield* dispatch(2, "Establish target", CLAUDE_MODEL_SELECTION);
               yield* wait(2);
               if (modelScenario) {
@@ -550,8 +578,61 @@ describe("orchestration v2 provider switching", () => {
                   ],
                 });
               }
-              yield* dispatch(3, "New source constraint", CODEX_MODEL_SELECTION);
+              if (scenario.includes("legacy-replacement")) {
+                const existing = yield* orchestrator.getThreadProjection(threadId);
+                yield* eventSink.write({
+                  events: existing.attempts.map(
+                    ({ nativeThreadId: _nativeThreadId, ...legacy }, index) => ({
+                      id: EventId.make(`legacy-attempt:${index}`),
+                      type: "run-attempt.updated" as const,
+                      threadId,
+                      occurredAt: existing.thread.createdAt,
+                      payload: legacy,
+                    }),
+                  ),
+                });
+              }
+              if (scenario.includes("telemetry")) {
+                const target = (yield* orchestrator.getThreadProjection(
+                  threadId,
+                )).providerThreads.find(
+                  (thread) => thread.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
+                )!;
+                yield* eventSink.write({
+                  events: [
+                    {
+                      id: EventId.make("compacted-context-usage"),
+                      type: "provider-thread.updated",
+                      threadId,
+                      occurredAt: yield* DateTime.now,
+                      payload: { ...target, contextUsage: { usedTokens: 100, maxTokens: 32_000 } },
+                    },
+                  ],
+                });
+              }
+              yield* dispatch(
+                3,
+                priorImages && !replaceNative
+                  ? "New source constraint " + "q".repeat(9_000)
+                  : "New source constraint",
+                CODEX_MODEL_SELECTION,
+              );
               yield* wait(3);
+            }
+            if (replaceNative) {
+              const target = (yield* orchestrator.getThreadProjection(
+                threadId,
+              )).providerThreads.find(
+                (thread) => thread.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
+              )!;
+              yield* orchestrator.dispatch({
+                type: "provider-session.detach",
+                commandId: CommandId.make("detach-for-native-replacement"),
+                threadId,
+                providerSessionId: target.providerSessionId!,
+              });
+              yield* worker.drain();
+              yield* Ref.set(failResumeOnce, true);
             }
             if (scenario.includes("retry")) yield* Ref.set(failStartOnce, true);
             yield* dispatch(targetOrdinal, current, targetSelection);
@@ -567,8 +648,86 @@ describe("orchestration v2 provider switching", () => {
               yield* dispatch(targetOrdinal + 1, current, targetSelection);
               yield* wait(targetOrdinal + 1);
             }
+            if (replaceNative) {
+              if (scenario.includes("legacy-replacement")) {
+                const recovered = yield* orchestrator.getThreadProjection(threadId);
+                const handoff = recovered.contextHandoffs.at(-1)!;
+                const { history: _history, ...legacyHandoff } = handoff;
+                yield* eventSink.write({
+                  events: [
+                    {
+                      id: EventId.make("legacy-replacement-handoff"),
+                      type: "context-handoff.updated",
+                      threadId,
+                      occurredAt: yield* DateTime.now,
+                      payload: {
+                        ...legacyHandoff,
+                        delivery: {
+                          nativeThreadId: handoff.delivery!.nativeThreadId,
+                          status: handoff.delivery!.status,
+                          itemIds: [],
+                        },
+                      },
+                    },
+                  ],
+                });
+              }
+              yield* dispatch(
+                targetOrdinal + 1,
+                "Continue after native replacement",
+                CLAUDE_MODEL_SELECTION,
+              );
+              yield* wait(targetOrdinal + 1);
+              yield* dispatch(
+                targetOrdinal + 2,
+                "Another source constraint " + "q".repeat(9_000),
+                CODEX_MODEL_SELECTION,
+              );
+              yield* wait(targetOrdinal + 2);
+              yield* dispatch(targetOrdinal + 3, current, CLAUDE_MODEL_SELECTION);
+              yield* wait(targetOrdinal + 3);
+            }
             const projection = yield* orchestrator.getThreadProjection(threadId);
             assert.equal(projection.runs.at(-1)?.status, "completed");
+            if (priorImages) {
+              const handoff = projection.contextHandoffs.at(-1)!;
+              const context = scenario.endsWith("-native")
+                ? yield* encodeJson(yield* Ref.get(injectedHistory))
+                : (yield* Ref.get(capturedTurns)).at(-1)!.text;
+              const shouldFit =
+                scenario.startsWith("imported") ||
+                scenario.includes("telemetry") ||
+                scenario.includes("unsent") ||
+                replaceNative;
+              const sourceText =
+                `${replaceNative ? "Another" : "New"} source constraint ` + "q".repeat(9_000);
+              const sourceItem = projection.turnItems.find(
+                (item) => item.type === "user_message" && item.text === sourceText,
+              )!;
+              assert.isDefined(sourceItem);
+              if (shouldFit) {
+                assert.include(context, sourceText);
+                assert.include(
+                  projection.contextHandoffs
+                    .filter((record) => record.targetRunId === projection.runs.at(-1)!.id)
+                    .flatMap((record) => record.delivery?.itemIds ?? []),
+                  sourceItem.id,
+                );
+              } else {
+                assert.notInclude(context, "q".repeat(9_000));
+                assert.isAbove(handoff.delivery!.omittedItemIds!.length, 0);
+              }
+              const latestRun = projection.runs.at(-1)!;
+              const latestAttempt = projection.attempts.find(
+                (attempt) => attempt.id === latestRun.activeAttemptId,
+              )!;
+              const target = projection.providerThreads.find(
+                (thread) => thread.id === latestAttempt.providerThreadId,
+              )!;
+              assert.equal(latestAttempt.nativeThreadId, target.nativeThreadRef!.nativeId);
+              if (replaceNative) assert.equal(yield* Ref.get(generation), 2);
+              return;
+            }
             const handoff = projection.contextHandoffs.at(-1)!;
             if (scenario.startsWith("screenshot")) {
               assert.deepEqual((yield* Ref.get(capturedTurns)).at(-1)!.attachments, screenshots);
@@ -2193,9 +2352,21 @@ describe("orchestration v2 provider switching", () => {
               Stream.runHead,
             );
             yield* worker.drain();
-            return yield* orchestrator.getThreadProjection(importedThreadId);
+          } else {
+            yield* waitForIdle(importedThreadId);
           }
-          return yield* waitForIdle(importedThreadId);
+          const beforeRebuild = yield* orchestrator.getThreadProjection(importedThreadId);
+          for (const attempt of beforeRebuild.attempts) {
+            const nativeId = beforeRebuild.providerThreads.find(
+              (thread) => thread.id === attempt.providerThreadId,
+            )?.nativeThreadRef?.nativeId;
+            assert.isDefined(nativeId);
+            assert.equal(attempt.nativeThreadId, nativeId);
+          }
+          yield* maintenance.rebuild;
+          const rebuilt = yield* orchestrator.getThreadProjection(importedThreadId);
+          assert.deepEqual(rebuilt.attempts, beforeRebuild.attempts);
+          return rebuilt;
         }).pipe(Effect.provide(testLayer));
 
         const turns = yield* Ref.get(capturedTurns);

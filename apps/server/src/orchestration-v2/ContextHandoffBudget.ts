@@ -15,6 +15,19 @@ export const handoffTokenCapConfig = Config.Int("T3CODE_CONTEXT_HANDOFF_TOKEN_CA
   Config.map((value) => Math.max(1_024, Math.min(HANDOFF_BYTE_CAP, value))),
 );
 
+export function attachmentTokenAllowance(attachments: ReadonlyArray<ChatAttachment>): number {
+  // Encoded image bytes are not model tokens. Without dimensions/detail metadata,
+  // reserve 8k tokens per image, above typical resized Codex/Claude image costs.
+  // This is a fallback estimate, not a bound for original-resolution/custom models.
+  // https://developers.openai.com/api/docs/guides/image-cost-calculator
+  // https://platform.claude.com/docs/en/build-with-claude/vision
+  // Other attachments are path references; reserve space for their descriptors.
+  return attachments.reduce(
+    (sum, attachment) => sum + (attachment.type === "image" ? 8_192 : 4_096),
+    0,
+  );
+}
+
 // One UTF-8 byte per token is deliberately pessimistic for byte-based tokenizers,
 // including multilingual text. It is not a tokenizer or a guarantee for arbitrary
 // custom models. Unknown windows use a 128k allowance, reserving a quarter for
@@ -24,7 +37,7 @@ export function handoffBudget(input: {
   readonly userText: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly providerThread: OrchestrationV2ProviderThread;
-  readonly nativeContextBytes: number;
+  readonly nativeContextEstimate: number;
   readonly modelContextWindow?: number | undefined;
 }): number {
   const usage = input.providerThread.contextUsage;
@@ -33,18 +46,9 @@ export function handoffBudget(input: {
     usage?.maxTokens ?? Infinity,
     usage?.autoCompactThreshold ?? Infinity,
   );
-  const native = usage?.usedTokens ?? input.nativeContextBytes;
-  // Encoded image bytes are not model tokens. Without dimensions/detail metadata,
-  // reserve 8k tokens per image, above typical resized Codex/Claude image costs.
-  // This is a fallback estimate, not a bound for original-resolution/custom models.
-  // https://developers.openai.com/api/docs/guides/image-cost-calculator
-  // https://platform.claude.com/docs/en/build-with-claude/vision
-  // Other attachments are path references; reserve space for their descriptors.
-  const attachmentAllowance = input.attachments.reduce(
-    (sum, attachment) => sum + (attachment.type === "image" ? 8_192 : 4_096),
-    0,
-  );
-  const current = Buffer.byteLength(JSON.stringify(input.userText)) + attachmentAllowance;
+  const native = usage?.usedTokens ?? input.nativeContextEstimate;
+  const current =
+    Buffer.byteLength(JSON.stringify(input.userText)) + attachmentTokenAllowance(input.attachments);
   return Math.max(
     0,
     Math.min(

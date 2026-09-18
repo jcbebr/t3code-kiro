@@ -213,11 +213,11 @@ describe("handoff budget", () => {
       userText: "Continue",
       attachments: [],
       providerThread,
-      nativeContextBytes: 0,
+      nativeContextEstimate: 0,
       modelContextWindow: 32_000,
     };
     assert.isBelow(handoffBudget(base), 16_000);
-    assert.isBelow(handoffBudget({ ...base, nativeContextBytes: 8_000 }), handoffBudget(base));
+    assert.isBelow(handoffBudget({ ...base, nativeContextEstimate: 8_000 }), handoffBudget(base));
     assert.equal(handoffBudget({ ...base, userText: "界".repeat(30_000) }), 0);
     assert.equal(
       handoffBudget({
@@ -267,7 +267,7 @@ describe("handoff budget", () => {
         tokenCap: 16_000,
         userText: "Compare these screenshots",
         providerThread,
-        nativeContextBytes: 0,
+        nativeContextEstimate: 0,
         attachments: Array.from({ length: count }, (_, index) => ({
           type: "image",
           id: `image-${index}`,

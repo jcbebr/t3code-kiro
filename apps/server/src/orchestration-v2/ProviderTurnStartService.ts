@@ -29,6 +29,7 @@ import {
   DEFAULT_HANDOFF_TOKEN_CAP,
   handoffTokenCapConfig,
   handoffBudget,
+  attachmentTokenAllowance,
   historicalMessage,
 } from "./ContextHandoffBudget.ts";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
@@ -590,6 +591,9 @@ export const layer: Layer.Layer<
       };
       const runningAttempt: OrchestrationV2RunAttempt = {
         ...attempt,
+        ...(runningProviderThread.nativeThreadRef?.nativeId == null
+          ? {}
+          : { nativeThreadId: runningProviderThread.nativeThreadRef.nativeId }),
         status: "running",
         startedAt: now,
       };
@@ -713,9 +717,46 @@ export const layer: Layer.Layer<
         ...deliveredItemIds,
         ...settledHandoffs.flatMap((handoff) => handoff.delivery?.omittedItemIds ?? []),
       ]);
-      // Canonical text is a fallback estimate when a resumed provider supplies no
-      // context telemetry. Native compaction/hidden tool state may differ.
-      const nativeContextBytes = () =>
+      const deliveredAttemptIds = new Set(
+        projection.providerTurns.map((turn) => turn.runAttemptId),
+      );
+      const acceptedAttempts = projection.attempts.filter(
+        (source) =>
+          source.providerThreadId === providerThread.id && deliveredAttemptIds.has(source.id),
+      );
+      const nativeInputRunIds = new Set(
+        acceptedAttempts
+          .filter(
+            (source) =>
+              source.nativeThreadId !== undefined &&
+              source.nativeThreadId === runningProviderThread.nativeThreadRef?.nativeId,
+          )
+          .map((source) => source.runId),
+      );
+      const legacyInputRunIds = new Set(
+        acceptedAttempts
+          .filter((source) => source.nativeThreadId === undefined)
+          .map((source) => source.runId),
+      );
+      const legacyRecoveredRunIds = new Set(
+        projection.runs
+          .filter(
+            (source) =>
+              source.providerThreadId === providerThread.id &&
+              settledHandoffs.some(
+                (handoff) =>
+                  handoff.strategy === "full_thread_summary" &&
+                  handoff.fromProviderThreadIds.includes(providerThread.id) &&
+                  source.ordinal >= handoff.coveredRunOrdinals.from &&
+                  source.ordinal <= handoff.coveredRunOrdinals.to,
+              ),
+          )
+          .map((source) => source.id),
+      );
+      // Use saved text and actual native attachments when telemetry is absent.
+      // Legacy attempts lack native identity; exclude their explicitly recovered
+      // history, whose attachments were not replayed into the replacement thread.
+      const nativeContextEstimate = () =>
         sameNativeThread
           ? projection.turnItems.reduce((sum, item) => {
               if (
@@ -727,7 +768,21 @@ export const layer: Layer.Layer<
               )
                 return sum;
               const historical = historicalMessage(item);
-              return sum + (historical === null ? 0 : Buffer.byteLength(historical.text));
+              const nativeAttachments =
+                item.type === "user_message" &&
+                item.providerThreadId === providerThread.id &&
+                item.runId !== null &&
+                (nativeInputRunIds.has(item.runId) ||
+                  (legacyInputRunIds.has(item.runId) &&
+                    !coveredItemIds.has(item.id) &&
+                    !legacyRecoveredRunIds.has(item.runId)))
+                  ? attachmentTokenAllowance(item.attachments)
+                  : 0;
+              return (
+                sum +
+                (historical === null ? 0 : Buffer.byteLength(historical.text)) +
+                nativeAttachments
+              );
             }, 0)
           : 0;
       const reportedUsage = sameSelection
@@ -741,9 +796,6 @@ export const layer: Layer.Layer<
         ...runningProviderThread,
         contextUsage: sameNativeThread ? (reportedUsage ?? null) : null,
       };
-      const deliveredAttemptIds = new Set(
-        projection.providerTurns.map((turn) => turn.runAttemptId),
-      );
       const missedRuns = projection.runs.filter(
         (source) =>
           source.ordinal < run.ordinal &&
@@ -801,9 +853,9 @@ export const layer: Layer.Layer<
               userText,
               attachments: message.attachments,
               providerThread: budgetProviderThread,
-              nativeContextBytes:
+              nativeContextEstimate:
                 budgetProviderThread.contextUsage?.usedTokens === undefined
-                  ? nativeContextBytes()
+                  ? nativeContextEstimate()
                   : 0,
             }),
             alreadyDeliveredItemIds: deliveredItemIds,
