@@ -5,10 +5,11 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   generateThirdPartyLicenseManifest,
+  syncThirdPartyLicenseNotices,
   THIRD_PARTY_LICENSES_FILE_NAME,
   thirdPartyLicensesPlugin,
 } from "./third-party-licenses.js";
@@ -69,6 +70,7 @@ async function createFixture(): Promise<{
 }
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await Promise.all(
     tempDirectories
       .splice(0)
@@ -77,6 +79,45 @@ afterEach(async () => {
 });
 
 describe("third-party license generation", () => {
+  it("builds complete generated notices from a fresh checkout without network access", async () => {
+    const fixture = await createFixture();
+    const fetch = vi.fn(() => Promise.reject(new Error("Network unavailable")));
+    vi.stubGlobal("fetch", fetch);
+    await NodeFSP.cp(
+      NodePath.join(REPOSITORY_ROOT, "third-party-licenses"),
+      NodePath.join(fixture.root, "third-party-licenses"),
+      { recursive: true },
+    );
+    await NodeFSP.copyFile(
+      NodePath.join(REPOSITORY_ROOT, "third-party-licenses.config.json"),
+      fixture.configFile,
+    );
+    // Check every template required by the real config, with no generated cache.
+    await syncThirdPartyLicenseNotices(fixture.configFile);
+    await writeJson(fixture.configFile, {
+      customNotices: [
+        {
+          name: "bundled-asset",
+          license: "MIT",
+          bundles: ["web"],
+          generatedNotices: [
+            { licenseId: "MIT", copyrights: ["Copyright (c) 2026 Example Author"] },
+          ],
+        },
+      ],
+      packageOverrides: [],
+    });
+    const manifest = await generateThirdPartyLicenseManifest({
+      configFile: fixture.configFile,
+      packageManifests: [{ bundle: "web", path: fixture.appManifest }],
+    });
+    const notice = manifest.entries.find((entry) => entry.name === "bundled-asset")?.noticeText;
+    expect(notice).toContain("Copyright (c) 2026 Example Author");
+    expect(notice).toContain("Permission is hereby granted");
+    expect(notice).toContain("THE SOFTWARE IS PROVIDED");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("keeps the GhosttyKit notice pinned to the vendored framework revision", async () => {
     const [config, revision] = await Promise.all([
       NodeFSP.readFile(NodePath.join(REPOSITORY_ROOT, "third-party-licenses.config.json"), "utf8"),

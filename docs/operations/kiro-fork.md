@@ -2,11 +2,34 @@
 
 The Windows desktop and mobile apps can connect to this fork through T3 Connect. To run agents on another computer, install the server and provider CLIs on that computer. Each host has its own projects, authentication, and T3 Connect identity.
 
-The steps below use Ubuntu in WSL 2. Run the shell commands inside the Linux distro, using its Linux Node.js installation. Keep the checkout and working repositories in the Linux filesystem, for example under `~/code`.
+The steps below use Ubuntu 24.04 in WSL 2. Run the shell commands inside the Linux distro, using its Linux Node.js installation. Keep the checkout and working repositories in the Linux filesystem, for example under `~/code`.
 
 ## Build the server
 
 Install Git, Node.js 24.13.1 or newer in the Node 24 release line, and [Vite+](https://viteplus.dev/guide/). The repository's `package.json` records the required Node version.
+
+The terminal dependency `node-pty` may need to compile from source. Install the native build tools before the JavaScript dependencies (omit `sudo` if already running as root):
+
+```sh
+sudo apt update
+sudo apt install -y git curl ca-certificates build-essential python3 pkg-config
+g++ --version
+```
+
+Use GCC/G++ 12.2 or newer for Node 24. Ubuntu 24.04 provides a suitable compiler. On Ubuntu 22.04, install `gcc-12 g++-12` and run installation with `CC=gcc-12 CXX=g++-12 vp i`. Installing `build-essential` alone on an older distro can leave an incompatible compiler. An error about an unrecognized `-std=gnu++20` flag means the compiler needs upgrading; changing that flag does not supply the missing C++ support.
+
+On Ubuntu 20.04, GCC 12 is available from the [Ubuntu toolchain PPA](https://wiki.ubuntu.com/ToolChain). To keep that distro, install the compiler alongside its existing one:
+
+```sh
+sudo apt update
+sudo apt install -y software-properties-common
+sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+sudo apt update
+sudo apt install -y build-essential python3 gcc-12 g++-12
+g++-12 --version
+```
+
+Then use `CC=gcc-12 CXX=g++-12 vp i && vp run --filter t3 build`. No global compiler switch is needed. These tools resolve the native Node dependency build; Kiro CLI must also support the distro's runtime libraries. Check `kiro-cli --version` after installation. Current Kiro provides a musl build for Linux hosts that do not meet its GNU binary's glibc requirement; see the [installation requirements](https://kiro.dev/docs/getting-started/installation/).
 
 ```sh
 curl -fsSL https://vite.plus | bash
@@ -20,8 +43,7 @@ cd ~/code
 git clone --branch feat/kiro-acp https://github.com/jcbebr/t3code-kiro.git
 cd t3code-kiro
 cp .env.example .env
-vp i
-vp run --filter t3 build
+vp i && vp run --filter t3 build
 ```
 
 Copy `.env.example` before building: it supplies the public application identifiers for the production T3 Connect service. It contains no account credentials. For an existing checkout, preserve any local settings when updating `.env`.

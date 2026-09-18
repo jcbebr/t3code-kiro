@@ -26,10 +26,11 @@ the final JavaScript bundle, but it avoids dropping a notice when platform bundl
 
 The build fails when a collected package has no distributable license identifier or contains no
 license or notice text. Generated notices use license templates from the pinned SPDX License List.
-Strict web and EAS builds download a missing template into the gitignored `.generated/` cache;
-`pnpm licenses:sync` can warm that cache explicitly. Local web and Metro development do not make a
-network request and omit generated rows until the cache exists. This keeps dev startup optional
-while preventing incomplete release artifacts.
+This fork bundles the configured templates under `third-party-licenses/spdx/`, so fresh web and
+EAS builds can generate complete notices without fetching them. Templates not bundled there fall
+back to the gitignored `.generated/` cache, then a download in strict builds; `vp run licenses:sync`
+can warm that cache explicitly. Local web and Metro development do not make a network request and
+omit generated rows only when neither a bundled template nor a cached template exists.
 
 ## Custom notices and package overrides
 
