@@ -17,17 +17,22 @@ export const handoffTokenCapConfig = Config.Int("T3CODE_CONTEXT_HANDOFF_TOKEN_CA
 
 // One UTF-8 byte per token is deliberately pessimistic for byte-based tokenizers,
 // including multilingual text. It is not a tokenizer or a guarantee for arbitrary
-// custom models. Unknown windows use a 32k allowance, with half reserved for tools,
-// instructions and subsequent work. Current input is never truncated.
+// custom models. Unknown windows use a 128k allowance, reserving a quarter for
+// tools, instructions and subsequent work. Current input is never truncated.
 export function handoffBudget(input: {
   readonly tokenCap: number;
   readonly userText: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly nativeContextBytes: number;
+  readonly modelContextWindow?: number | undefined;
 }): number {
   const usage = input.providerThread.contextUsage;
-  const window = Math.min(usage?.maxTokens ?? 32_000, usage?.autoCompactThreshold ?? Infinity);
+  const window = Math.min(
+    input.modelContextWindow ?? usage?.maxTokens ?? 128_000,
+    usage?.maxTokens ?? Infinity,
+    usage?.autoCompactThreshold ?? Infinity,
+  );
   const native = usage?.usedTokens ?? input.nativeContextBytes;
   // Encoded image bytes are not model tokens. Without dimensions/detail metadata,
   // reserve 8k tokens per image, above typical resized Codex/Claude image costs.

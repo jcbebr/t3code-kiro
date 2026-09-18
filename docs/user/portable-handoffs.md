@@ -26,10 +26,19 @@ model before trying again.
 
 Server operators can set `T3CODE_CONTEXT_HANDOFF_TOKEN_CAP` to change the initial history allowance
 (default 16,000; clamped to 1,024–64,000). This is an upper bound, not a provider context-window
-guarantee. Accounting conservatively charges one token per UTF-8 byte, including attribution and
-JSON escaping, and caps handoff plus current-input accounting at 64,000 bytes. Attachments reserve
-at least 4,096 units each, or their byte size when larger.
+guarantee. Text accounting conservatively charges one token per UTF-8 byte, including attribution
+and JSON escaping. Imported history has a separate 64,000-byte ceiling; your current input and
+attachment payloads do not consume that ceiling.
 
-When provider context telemetry is unavailable, T3 Code assumes a 32,000-token window, reserves at
-least 16,000 for instructions, tools, and work, and estimates existing context from saved activity.
-Custom models and hidden native context can differ, so the provider may still reject an input.
+T3 Code uses available capacity information for your selected model and options, together with
+provider context telemetry. Starting a fresh provider conversation clears prior usage, while keeping
+known model capacity. Changing models or context-window options discards stale usage and compaction
+thresholds.
+
+When no capacity information is available, T3 Code assumes a 128,000-token window. It reserves at
+least 16,000 tokens, or a quarter of the window when larger, for instructions, tools, and subsequent
+work. Images reserve an estimated 8,192 tokens each, independent of their file size; other
+attachments reserve 4,096 each for their references. Existing context is estimated from saved
+activity when usage telemetry is unavailable. Known smaller windows still constrain the handoff.
+These are fallback estimates, not exact token counts. Image resolution, custom models, and hidden
+native context can differ, so the provider may still reject an input.

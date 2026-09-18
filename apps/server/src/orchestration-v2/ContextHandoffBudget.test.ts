@@ -2,6 +2,7 @@ import type { ProviderAdapterV2HistoricalContext } from "./ProviderAdapter.ts";
 import { assert, describe, it } from "@effect/vitest";
 import {
   ContextHandoffId,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
@@ -213,6 +214,7 @@ describe("handoff budget", () => {
       attachments: [],
       providerThread,
       nativeContextBytes: 0,
+      modelContextWindow: 32_000,
     };
     assert.isBelow(handoffBudget(base), 16_000);
     assert.isBelow(handoffBudget({ ...base, nativeContextBytes: 8_000 }), handoffBudget(base));
@@ -245,6 +247,7 @@ describe("handoff budget", () => {
         handoffBudget({
           ...base,
           tokenCap: 64_000,
+          modelContextWindow: 1_000_000,
           // The history byte cap is independent of both current text and image payloads.
           userText: "x".repeat(70_000),
           attachments,
@@ -257,6 +260,46 @@ describe("handoff budget", () => {
       );
     }
     assert.equal(handoffBudget({ ...base, tokenCap: 2_000 }), 2_000);
+  });
+  it("budgets all supported image counts with unknown capacity, honoring smaller known windows", () => {
+    for (let count = 1; count <= PROVIDER_SEND_TURN_MAX_ATTACHMENTS; count++) {
+      const input = {
+        tokenCap: 16_000,
+        userText: "Compare these screenshots",
+        providerThread,
+        nativeContextBytes: 0,
+        attachments: Array.from({ length: count }, (_, index) => ({
+          type: "image",
+          id: `image-${index}`,
+          name: "image.png",
+          mimeType: "image/png",
+          sizeBytes: 10 * 1024 * 1024,
+        })),
+      };
+      const budget = handoffBudget(input);
+      assert.equal(budget, 16_000);
+      const selected = selectHistory({ messages, coverage: "Recover omitted history", budget });
+      assert.isAtMost(historyCost(selected.messages, selected.context), budget);
+      assert.equal(handoffBudget({ ...input, modelContextWindow: 20_000 }), 0);
+      assert.equal(
+        handoffBudget({
+          ...input,
+          providerThread: { ...providerThread, contextUsage: { usedTokens: 0, maxTokens: 20_000 } },
+        }),
+        0,
+      );
+      assert.equal(
+        handoffBudget({
+          ...input,
+          modelContextWindow: 1_000_000,
+          providerThread: {
+            ...providerThread,
+            contextUsage: { usedTokens: 0, maxTokens: 1_000_000, autoCompactThreshold: 20_000 },
+          },
+        }),
+        0,
+      );
+    }
   });
 });
 

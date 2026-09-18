@@ -19,6 +19,7 @@ import {
   ThreadId,
   TurnItemId,
   ProviderDriverKind,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -111,6 +112,8 @@ function makeTestAdapter(input: {
   readonly failInjectionOnce?: Ref.Ref<boolean>;
   readonly nativeThreadGeneration?: Ref.Ref<number>;
   readonly failResume?: boolean;
+  readonly initialContextUsage?: OrchestrationV2ProviderThread["contextUsage"];
+  readonly getModelContextWindow?: (selection: ModelSelection) => number | undefined;
   readonly failedRunOrdinals?: ReadonlySet<number>;
   readonly interruptedRunOrdinals?: ReadonlySet<number>;
   readonly holdRunOrdinal?: number;
@@ -145,6 +148,9 @@ function makeTestAdapter(input: {
           providerSessionId: sessionInput.providerSessionId,
           providerSession,
           events: Stream.fromPubSub(events),
+          ...(input.getModelContextWindow === undefined
+            ? {}
+            : { getModelContextWindow: input.getModelContextWindow }),
           ensureThread: (threadInput) =>
             Effect.gen(function* () {
               const createdAt = yield* DateTime.now;
@@ -170,6 +176,7 @@ function makeTestAdapter(input: {
                 firstRunOrdinal: null,
                 lastRunOrdinal: null,
                 handoffIds: [],
+                contextUsage: input.initialContextUsage ?? null,
                 forkedFrom: null,
                 createdAt,
                 updatedAt: createdAt,
@@ -355,6 +362,16 @@ describe("orchestration v2 provider switching", () => {
     "large-current-input",
     "screenshot-native",
     "screenshot-fallback",
+    "screenshot-pair-native",
+    "screenshot-pair-fallback",
+    "screenshot-eight-native",
+    "screenshot-eight-fallback",
+    "screenshot-large-model-native",
+    "screenshot-reported-capacity-native",
+    "screenshot-model-change-native",
+    "screenshot-option-change-native",
+    "screenshot-model-change-retry-native",
+    "screenshot-option-change-retry-native",
     "delivery-write-failure",
   ] as const) {
     it.live(`preserves handoffs through ${scenario}`, () =>
@@ -363,6 +380,18 @@ describe("orchestration v2 provider switching", () => {
           const cwd = yield* checkpointWorkspace(`handoff-${scenario}`);
           const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
           const injectedHistory = yield* Ref.make<ReadonlyArray<unknown>>([]);
+          const modelScenario = scenario.includes("model") || scenario.includes("option-change");
+          const failStartOnce = yield* Ref.make(false);
+          const capacityScenario = modelScenario || scenario.includes("reported-capacity");
+          const returning = scenario === "large-current-input" || scenario.includes("-change-");
+          const targetSelection: ModelSelection = !modelScenario
+            ? CLAUDE_MODEL_SELECTION
+            : {
+                ...CLAUDE_MODEL_SELECTION,
+                ...(scenario.includes("option-change")
+                  ? { options: [{ id: "contextWindow", value: "1m" }] }
+                  : { model: `${CLAUDE_MODEL_SELECTION.model}-large` }),
+              };
           const registry = makeProviderAdapterRegistryLayer([
             makeTestAdapter({
               instanceId: CODEX_MODEL_SELECTION.instanceId,
@@ -379,9 +408,24 @@ describe("orchestration v2 provider switching", () => {
               modelSelection: CLAUDE_MODEL_SELECTION,
               responseByRunOrdinal: {},
               capturedTurns,
-              ...(scenario === "compact-native" ||
-              scenario === "large-current-input" ||
-              scenario === "screenshot-native"
+              ...(scenario.includes("retry") ? { failStartOnce } : {}),
+              ...(scenario.includes("reported-capacity")
+                ? { initialContextUsage: { usedTokens: 999_999, maxTokens: 1_000_000 } }
+                : {}),
+              ...(modelScenario
+                ? {
+                    getModelContextWindow: (selection: ModelSelection) =>
+                      selection.model.endsWith("-large") ||
+                      selection.options?.some(
+                        (option) => option.id === "contextWindow" && option.value === "1m",
+                      )
+                        ? 1_000_000
+                        : 32_000,
+                  }
+                : scenario === "large-current-input"
+                  ? { getModelContextWindow: () => 32_000 }
+                  : {}),
+              ...(scenario.endsWith("-native") || scenario === "large-current-input"
                 ? { injectedHistory }
                 : {}),
             }),
@@ -397,6 +441,18 @@ describe("orchestration v2 provider switching", () => {
               mimeType: "image/png",
               sizeBytes: 100_000,
             };
+            const screenshots = Array.from(
+              {
+                length:
+                  scenario.includes("eight") || capacityScenario
+                    ? PROVIDER_SEND_TURN_MAX_ATTACHMENTS
+                    : scenario.includes("pair")
+                      ? 2
+                      : 1,
+              },
+              (_, index) => ({ ...screenshot, id: `screenshot-${index}` }),
+            );
+            const targetOrdinal = returning ? 4 : 2;
             const dispatch = (ordinal: number, text: string, selection: ModelSelection) =>
               orchestrator.dispatch({
                 type: "message.dispatch",
@@ -406,7 +462,8 @@ describe("orchestration v2 provider switching", () => {
                 createdBy: "user",
                 creationSource: "web",
                 text,
-                attachments: scenario.startsWith("screenshot") && ordinal === 2 ? [screenshot] : [],
+                attachments:
+                  scenario.startsWith("screenshot") && ordinal >= targetOrdinal ? screenshots : [],
                 modelSelection: selection,
                 dispatchMode: { type: "start_immediately" },
               });
@@ -458,25 +515,63 @@ describe("orchestration v2 provider switching", () => {
             yield* Effect.addFinalizer(() => Effect.sync(() => spy?.mockRestore()));
             const current = scenario.startsWith("compact")
               ? "/compact"
-              : scenario === "large-current-input"
-                ? "x".repeat(9_000)
-                : "Continue work";
+              : capacityScenario
+                ? "x".repeat(70_000)
+                : scenario === "large-current-input"
+                  ? "x".repeat(9_000)
+                  : "Continue work";
             // First establish the returning native thread: the current request must
             // not be charged as existing context on the subsequent handoff.
-            if (scenario === "large-current-input") {
+            if (returning) {
               yield* dispatch(2, "Establish target", CLAUDE_MODEL_SELECTION);
               yield* wait(2);
+              if (modelScenario) {
+                const target = (yield* orchestrator.getThreadProjection(
+                  threadId,
+                )).providerThreads.find(
+                  (thread) => thread.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
+                )!;
+                yield* eventSink.write({
+                  events: [
+                    {
+                      id: EventId.make("old-model-usage"),
+                      type: "provider-thread.updated",
+                      threadId,
+                      occurredAt: yield* DateTime.now,
+                      payload: {
+                        ...target,
+                        contextUsage: {
+                          usedTokens: 30_000,
+                          maxTokens: 32_000,
+                          autoCompactThreshold: 31_000,
+                        },
+                      },
+                    },
+                  ],
+                });
+              }
               yield* dispatch(3, "New source constraint", CODEX_MODEL_SELECTION);
               yield* wait(3);
             }
-            const targetOrdinal = scenario === "large-current-input" ? 4 : 2;
-            yield* dispatch(targetOrdinal, current, CLAUDE_MODEL_SELECTION);
+            if (scenario.includes("retry")) yield* Ref.set(failStartOnce, true);
+            yield* dispatch(targetOrdinal, current, targetSelection);
             yield* wait(targetOrdinal);
+            if (scenario.includes("retry")) {
+              const failed = yield* orchestrator.getThreadProjection(threadId);
+              assert.equal(failed.runs.at(-1)?.status, "failed");
+              assert.isNull(
+                failed.providerThreads.find(
+                  (thread) => thread.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
+                )!.contextUsage,
+              );
+              yield* dispatch(targetOrdinal + 1, current, targetSelection);
+              yield* wait(targetOrdinal + 1);
+            }
             const projection = yield* orchestrator.getThreadProjection(threadId);
             assert.equal(projection.runs.at(-1)?.status, "completed");
             const handoff = projection.contextHandoffs.at(-1)!;
             if (scenario.startsWith("screenshot")) {
-              assert.deepEqual((yield* Ref.get(capturedTurns)).at(-1)!.attachments, [screenshot]);
+              assert.deepEqual((yield* Ref.get(capturedTurns)).at(-1)!.attachments, screenshots);
             }
             if (scenario === "compact-fallback" || scenario === "compact-legacy") {
               if (scenario === "compact-legacy") {
@@ -508,11 +603,11 @@ describe("orchestration v2 provider switching", () => {
               );
             } else if (
               scenario === "delivery-write-failure" ||
-              scenario === "screenshot-fallback"
+              (scenario.startsWith("screenshot") && scenario.endsWith("fallback"))
             ) {
               assert.equal(
                 handoff.delivery?.status,
-                scenario === "screenshot-fallback" ? "inline" : "pending",
+                scenario.startsWith("screenshot") ? "inline" : "pending",
               );
               assert.include(
                 (yield* Ref.get(capturedTurns)).at(-1)!.text,
@@ -574,6 +669,7 @@ describe("orchestration v2 provider switching", () => {
                 capturedTurns,
                 injectedHistory,
                 nativeThreadGeneration: generation,
+                getModelContextWindow: () => 32_000,
                 ...(failure !== "injection"
                   ? { failStartOnce: failOnce }
                   : { failInjectionOnce: failOnce }),
