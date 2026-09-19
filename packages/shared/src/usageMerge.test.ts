@@ -1,14 +1,22 @@
 import {
+  KiroUsageBucket,
   USAGE_CONTRACT_VERSION,
+  UsageSummary,
   type EnvironmentId,
+  type KiroUsageSource,
   type UsageBucket,
   type UsageDay,
   type UsageProviderKind,
-  type UsageSummary,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import { isModelCostUnknown, mergeUsage, type EnvironmentUsage } from "./usageMerge.ts";
+
+const { kiro: _kiroField, ...legacyUsageFields } = UsageSummary.fields;
+const decodeLegacySummary = Schema.decodeUnknownSync(Schema.Struct(legacyUsageFields));
+const decodeSummary = Schema.decodeUnknownSync(UsageSummary);
+const decodeKiroBucket = Schema.decodeUnknownSync(KiroUsageBucket);
 
 function bucket(overrides: Partial<UsageBucket> = {}): UsageBucket {
   return {
@@ -370,4 +378,344 @@ describe("mergeUsage", () => {
     expect(merged.daily).toHaveLength(1);
     expect(merged.daily[0]?.costUsd).toBe(10);
   });
+});
+
+function kiroBucket(overrides: Partial<KiroUsageBucket> = {}): KiroUsageBucket {
+  return {
+    day: "2026-08-07" as UsageDay,
+    model: "claude-sonnet-4.5",
+    credits: 0.123456,
+    records: 2,
+    sessions: 1,
+    ...overrides,
+  };
+}
+
+function kiroSource(overrides: Partial<KiroUsageSource> = {}): KiroUsageSource {
+  return {
+    fingerprint: {
+      hostId: "linux",
+      resolvedHomePath: "/home/user/.local/share/kiro-cli",
+      volumeId: "100:200",
+    },
+    status: "ok",
+    scannedFiles: 1,
+    skippedFiles: 0,
+    malformedRecords: 0,
+    distinctSessions: 1,
+    message: null,
+    buckets: [kiroBucket()],
+    ...overrides,
+  };
+}
+
+function kiroSummary(sources: readonly KiroUsageSource[]): UsageSummary {
+  return { ...summary([], []), kiro: { sources } };
+}
+
+describe("Kiro usage extension", () => {
+  it("preserves decoding in v5 clients that do not know the extension", () => {
+    const standard = summary(
+      [bucket()],
+      [{ provider: "claude", hostId: "linux", homePath: "/home/user/.claude" }],
+    );
+    const extended = { ...standard, kiro: { sources: [kiroSource()] } };
+
+    expect(decodeLegacySummary(extended)).toEqual(standard);
+    expect(decodeSummary(standard)).toEqual(standard);
+    expect(decodeSummary(extended)).toEqual(extended);
+    expect(USAGE_CONTRACT_VERSION).toBe(5);
+  });
+
+  it("leaves legacy summaries unchanged without the extension", () => {
+    const merged = mergeUsage([environment("old-server", summary([], []))], USAGE_CONTRACT_VERSION);
+    expect(merged).not.toHaveProperty("kiro");
+  });
+
+  it("merges fractional credits without pricing them in USD or estimating tokens", () => {
+    const original = summary(
+      [bucket()],
+      [{ provider: "claude", hostId: "linux", homePath: "/home/user/.claude" }],
+    );
+    const merged = mergeUsage(
+      [
+        environment("server", {
+          ...original,
+          kiro: {
+            sources: [
+              kiroSource({
+                buckets: [kiroBucket(), kiroBucket({ credits: 0.000001 })],
+              }),
+            ],
+          },
+        }),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.kiro?.credits).toBeCloseTo(0.123457, 12);
+    expect(merged.kiro?.models[0]?.credits).toBeCloseTo(0.123457, 12);
+    expect(merged.kiro?.daily[0]?.credits).toBeCloseTo(0.123457, 12);
+    expect(merged.kiro).toMatchObject({
+      records: 4,
+      sessions: 1,
+      totalTokens: null,
+      tokenRecords: 0,
+      partial: false,
+      unavailable: false,
+    });
+    const { kiro: _kiro, ...standard } = merged;
+    expect(standard).toEqual(mergeUsage([environment("server", original)], USAGE_CONTRACT_VERSION));
+  });
+
+  it("deduplicates a physical source in stable environment order", () => {
+    const merged = mergeUsage(
+      [
+        environment("z", kiroSummary([kiroSource()])),
+        environment("a", kiroSummary([kiroSource()])),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.kiro).toMatchObject({ credits: 0.123456, records: 2, sessions: 1 });
+    expect(merged.duplicateSources).toEqual(["z: /home/user/.local/share/kiro-cli"]);
+    expect(merged.contributingEnvironments).toEqual(["a"]);
+  });
+
+  it("prefers a complete scan over failed or partial duplicate sources", () => {
+    const environments = [
+      environment(
+        "a-failed",
+        kiroSummary([
+          kiroSource({
+            status: "failed",
+            buckets: [],
+            distinctSessions: 0,
+            message: "History could not be read.",
+          }),
+        ]),
+      ),
+      environment("b-partial", kiroSummary([kiroSource({ status: "partial" })])),
+      environment(
+        "z-complete",
+        kiroSummary([kiroSource({ buckets: [kiroBucket({ credits: 3, records: 5 })] })]),
+      ),
+    ];
+    const merged = mergeUsage(environments, USAGE_CONTRACT_VERSION);
+    expect(merged.kiro).toMatchObject({
+      credits: 3,
+      records: 5,
+      sessions: 1,
+      partial: false,
+      unavailable: false,
+      messages: [],
+    });
+    expect(merged.contributingEnvironments).toEqual(["z-complete"]);
+    expect(merged.duplicateSources).toHaveLength(2);
+    expect(mergeUsage(environments.toReversed(), USAGE_CONTRACT_VERSION)).toEqual(merged);
+  });
+
+  it("retains partial data when the other scan of the same source failed", () => {
+    const merged = mergeUsage(
+      [
+        environment(
+          "a-failed",
+          kiroSummary([kiroSource({ status: "failed", buckets: [], distinctSessions: 0 })]),
+        ),
+        environment("z-partial", kiroSummary([kiroSource({ status: "partial" })])),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.kiro).toMatchObject({
+      credits: 0.123456,
+      records: 2,
+      partial: true,
+      unavailable: false,
+    });
+    expect(merged.contributingEnvironments).toEqual(["z-partial"]);
+  });
+
+  it("keeps different filesystem identities even with matching hostnames and paths", () => {
+    const source = kiroSource();
+    const merged = mergeUsage(
+      [
+        environment("a", kiroSummary([source])),
+        environment(
+          "b",
+          kiroSummary([
+            kiroSource({
+              fingerprint: { ...source.fingerprint, volumeId: "100:201" },
+            }),
+          ]),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.kiro?.credits).toBeCloseTo(0.246912, 12);
+    expect(merged.kiro).toMatchObject({ records: 4, sessions: 2 });
+    expect(merged.duplicateSources).toEqual([]);
+    expect(merged.contributingEnvironments).toEqual(["a", "b"]);
+  });
+
+  it("sums only real tokens and reports incomplete record coverage per model", () => {
+    const merged = mergeUsage(
+      [
+        environment(
+          "a",
+          kiroSummary([
+            kiroSource({
+              buckets: [
+                kiroBucket(),
+                kiroBucket({
+                  totals: { ...bucket().totals, reasoningTokens: 40 },
+                  tokenRecords: 1,
+                }),
+                kiroBucket({ model: "unknown-token-model" }),
+              ],
+            }),
+          ]),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.kiro).toMatchObject({ totalTokens: 1160, tokenRecords: 1, records: 6 });
+    expect(merged.kiro?.models).toMatchObject([
+      { model: "claude-sonnet-4.5", totalTokens: 1160, tokenRecords: 1, records: 4 },
+      { model: "unknown-token-model", totalTokens: null, tokenRecords: 0, records: 2 },
+    ]);
+    expect(merged.totalTokens).toBe(0);
+  });
+
+  it("recognizes real zero token counts when a record supplies them", () => {
+    const merged = mergeUsage(
+      [
+        environment(
+          "a",
+          kiroSummary([
+            kiroSource({
+              buckets: [
+                kiroBucket({
+                  totals: {
+                    uncachedInputTokens: 0,
+                    cachedInputTokens: 0,
+                    cacheCreationTokens: 0,
+                    outputTokens: 0,
+                    reasoningTokens: 0,
+                  },
+                }),
+              ],
+            }),
+          ]),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.kiro).toMatchObject({ totalTokens: 0, tokenRecords: 2 });
+  });
+
+  it("distinguishes an unreadable source from a successful scan with zero usage", () => {
+    const unavailable = mergeUsage(
+      [
+        environment(
+          "a",
+          kiroSummary([
+            kiroSource({
+              status: "missing",
+              message: "Kiro history was not found.",
+              buckets: [],
+              distinctSessions: 0,
+            }),
+          ]),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(unavailable.kiro).toMatchObject({
+      credits: 0,
+      unavailable: true,
+      partial: true,
+      messages: ["a: Kiro history was not found."],
+    });
+    const empty = mergeUsage(
+      [environment("a", kiroSummary([kiroSource({ buckets: [], distinctSessions: 0 })]))],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(empty.kiro).toMatchObject({
+      credits: 0,
+      records: 0,
+      sessions: 0,
+      unavailable: false,
+      partial: false,
+      messages: [],
+    });
+  });
+
+  it("reports unavailable when every parsed record was malformed", () => {
+    const merged = mergeUsage(
+      [
+        environment(
+          "a",
+          kiroSummary([
+            kiroSource({
+              status: "partial",
+              malformedRecords: 2,
+              buckets: [],
+              distinctSessions: 0,
+              message: "No session contained valid usage records.",
+            }),
+          ]),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.kiro).toMatchObject({
+      records: 0,
+      unavailable: true,
+      partial: true,
+      messages: ["a: No session contained valid usage records."],
+    });
+  });
+
+  it("keeps partial data and messages without inventing usage for failed sources", () => {
+    const partial = kiroSource({ status: "partial", message: "One session could not be read." });
+    const failed = kiroSource({
+      fingerprint: { ...partial.fingerprint, volumeId: "other-volume" },
+      status: "failed",
+      message: "Kiro history could not be read.",
+      buckets: [],
+      distinctSessions: 0,
+    });
+    const merged = mergeUsage(
+      [environment("a", kiroSummary([partial])), environment("b", kiroSummary([failed]))],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.kiro).toMatchObject({
+      credits: 0.123456,
+      records: 2,
+      partial: true,
+      unavailable: false,
+      messages: ["a: One session could not be read.", "b: Kiro history could not be read."],
+    });
+  });
+
+  it("ignores Kiro data from incompatible environments", () => {
+    const merged = mergeUsage(
+      [
+        environment("current", kiroSummary([kiroSource()])),
+        environment("old", {
+          ...kiroSummary([kiroSource()]),
+          contractVersion: 1,
+        }),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.kiro?.credits).toBe(0.123456);
+    expect(merged.staleEnvironments).toEqual(["old"]);
+    expect(merged.duplicateSources).toEqual([]);
+  });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    "rejects invalid credit values at the contract boundary: %s",
+    (credits) => {
+      expect(() => decodeKiroBucket(kiroBucket({ credits }))).toThrow();
+    },
+  );
 });

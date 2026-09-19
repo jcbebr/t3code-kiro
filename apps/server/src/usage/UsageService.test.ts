@@ -99,6 +99,7 @@ const serviceLayers = (input: {
     ),
     Layer.provideMerge(
       Layer.succeed(HostProcessEnvironment, {
+        HOME: input.home,
         GROK_HOME: NodePath.join(input.home, "grok"),
         ...input.environment,
       }),
@@ -110,6 +111,165 @@ function totalOutputTokens(summary: { buckets: readonly { totals: { outputTokens
 }
 
 describe("UsageService", () => {
+  it.live("includes native Kiro credits once without changing existing token or cost totals", () =>
+    Effect.gen(function* () {
+      const { home, transcript, settings } = yield* setup;
+      const directory = NodePath.join(home, ".kiro", "sessions", "cli");
+      const kiroSession = (credits: number) => ({
+        session_id: "kiro-native-session",
+        session_state: {
+          conversation_metadata: {
+            user_turn_metadatas: [
+              {
+                end_timestamp: "2026-08-01T10:00:00Z",
+                model: "auto",
+                metering_usage: [{ value: credits, unit: "credit" }],
+                input_token_count: 0,
+                output_token_count: 0,
+                cache_read_input_token_count: 0,
+                cache_write_input_token_count: 0,
+                result: { Ok: { id: "kiro-native-turn" } },
+              },
+            ],
+          },
+        },
+      });
+      const sessionPath = NodePath.join(directory, "session.json");
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(directory, { recursive: true });
+        await NodeFSP.writeFile(sessionPath, encodeUnknownJsonString(kiroSession(0.125)));
+        await NodeFSP.writeFile(transcript, claudeLine(1, 5));
+      });
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-service-kiro-test",
+            home,
+            settings: {
+              ...settings,
+              providerInstances: {
+                [ProviderInstanceId.make("kiro")]: { driver: ProviderDriverKind.make("kiro") },
+                [ProviderInstanceId.make("kiro-disabled")]: {
+                  driver: ProviderDriverKind.make("kiro"),
+                  enabled: false,
+                },
+              },
+            },
+          }),
+        ),
+      );
+      const first = yield* service.readSummary(WINDOW);
+      assert.strictEqual(first.kiro?.sources.length, 1);
+      assert.strictEqual(first.kiro?.sources[0]?.buckets[0]?.credits, 0.125);
+      assert.strictEqual(first.kiro?.sources[0]?.buckets[0]?.totals, undefined);
+      assert.strictEqual(totalOutputTokens(first), 5);
+      assert.strictEqual(first.contractVersion, 5);
+      const repeat = yield* service.readSummary(WINDOW);
+      assert.deepStrictEqual(repeat.kiro, first.kiro);
+
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(sessionPath, encodeUnknownJsonString(kiroSession(0.3125))),
+      );
+      const updated = yield* service.readSummary(WINDOW);
+      assert.strictEqual(updated.kiro?.sources[0]?.buckets[0]?.credits, 0.3125);
+      assert.deepStrictEqual(updated.buckets, first.buckets);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("omits Kiro when absent and reports a configured missing history as unavailable", () =>
+    Effect.gen(function* () {
+      const { home, settings } = yield* setup;
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-service-no-kiro-test",
+            home,
+            settings,
+          }),
+        ),
+      );
+      assert.strictEqual((yield* service.readSummary(WINDOW)).kiro, undefined);
+      const configured = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-service-missing-kiro-test",
+            home,
+            settings: {
+              ...settings,
+              providerInstances: {
+                [ProviderInstanceId.make("kiro")]: { driver: ProviderDriverKind.make("kiro") },
+              },
+            },
+          }),
+        ),
+      );
+      const result = yield* configured.readSummary(WINDOW);
+      assert.strictEqual(result.kiro?.sources[0]?.status, "missing");
+      assert.deepStrictEqual(result.kiro?.sources[0]?.buckets, []);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("reads a shared custom Kiro HOME without reporting the absent default HOME", () =>
+    Effect.gen(function* () {
+      const { home, settings } = yield* setup;
+      const customHome = NodePath.join(home, "kiro-account");
+      const directory = NodePath.join(customHome, ".kiro", "sessions", "cli");
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(directory, { recursive: true });
+        await NodeFSP.writeFile(
+          NodePath.join(directory, "session.json"),
+          encodeUnknownJsonString({
+            session_id: "custom-home-session",
+            session_state: {
+              conversation_metadata: {
+                user_turn_metadatas: [
+                  {
+                    end_timestamp: "2026-08-01T10:00:00Z",
+                    model: "auto",
+                    metering_usage: [{ value: 0.25, unit: "credit" }],
+                    result: { Ok: { id: "custom-home-turn" } },
+                  },
+                ],
+              },
+            },
+          }),
+        );
+      });
+      const environment = [{ name: "HOME", value: customHome, sensitive: false }];
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-service-custom-kiro-home-test",
+            home,
+            settings: {
+              ...settings,
+              providerInstances: {
+                [ProviderInstanceId.make("kiro-work")]: {
+                  driver: ProviderDriverKind.make("kiro"),
+                  environment,
+                },
+                [ProviderInstanceId.make("kiro-work-disabled")]: {
+                  driver: ProviderDriverKind.make("kiro"),
+                  enabled: false,
+                  environment,
+                },
+              },
+            },
+          }),
+        ),
+      );
+      const summary = yield* service.readSummary(WINDOW);
+      assert.strictEqual(summary.kiro?.sources.length, 1);
+      assert.strictEqual(summary.kiro?.sources[0]?.status, "ok");
+      assert.strictEqual(summary.kiro?.sources[0]?.message, null);
+      assert.strictEqual(summary.kiro?.sources[0]?.buckets[0]?.credits, 0.25);
+      assert.strictEqual(
+        summary.kiro?.sources[0]?.fingerprint.resolvedHomePath,
+        yield* Effect.promise(() => NodeFSP.realpath(directory)),
+      );
+    }).pipe(Effect.scoped),
+  );
+
   it.live("reads configured and disabled accounts once across shared and aliased homes", () =>
     Effect.gen(function* () {
       const { transcript, settings, home } = yield* setup;

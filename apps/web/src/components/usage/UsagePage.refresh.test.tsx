@@ -1,5 +1,10 @@
-import { EnvironmentId, ProviderInstanceId, USAGE_CONTRACT_VERSION } from "@t3tools/contracts";
-import { mergeUsage } from "@t3tools/shared/usageMerge";
+import {
+  EnvironmentId,
+  ProviderInstanceId,
+  USAGE_CONTRACT_VERSION,
+  type UsageSummaryInput,
+} from "@t3tools/contracts";
+import { mergeUsage, type MergedKiroUsage } from "@t3tools/shared/usageMerge";
 import { StrictMode, act } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -7,6 +12,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 const state = vi.hoisted(() => ({
   presentations: new Map(),
   refreshProviders: vi.fn(async () => undefined),
+  readUsage: vi.fn(),
+  kiro: undefined as MergedKiroUsage | undefined,
   metric: "limits",
 }));
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => state.presentations }));
@@ -18,30 +25,36 @@ vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => state.ref
 vi.mock("../../env", () => ({ isElectron: false }));
 vi.mock("../../hooks/useSettings", () => ({ usePrimarySettings: () => "24h" }));
 vi.mock("../../state/usage", () => ({
-  useUsage: () => ({
-    merged: mergeUsage([], USAGE_CONTRACT_VERSION),
-    environments: [
-      {
-        environmentId: EnvironmentId.make("test"),
-        label: "Test",
-        isPending: false,
-        error: null,
-        summary: null,
+  useUsage: (input: UsageSummaryInput) => {
+    state.readUsage(input);
+    return {
+      merged: {
+        ...mergeUsage([], USAGE_CONTRACT_VERSION),
+        ...(state.kiro === undefined ? {} : { kiro: state.kiro }),
       },
-    ],
-    selectedEnvironments: [
-      {
-        environmentId: EnvironmentId.make("test"),
-        label: "Test",
-        isPending: false,
-        error: null,
-        summary: null,
-      },
-    ],
-    isPending: false,
-    isPartial: false,
-    refresh: async () => undefined,
-  }),
+      environments: [
+        {
+          environmentId: EnvironmentId.make("test"),
+          label: "Test",
+          isPending: false,
+          error: null,
+          summary: null,
+        },
+      ],
+      selectedEnvironments: [
+        {
+          environmentId: EnvironmentId.make("test"),
+          label: "Test",
+          isPending: false,
+          error: null,
+          summary: null,
+        },
+      ],
+      isPending: false,
+      isPartial: false,
+      refresh: async () => undefined,
+    };
+  },
 }));
 vi.mock("./usagePagePreferences", () => ({
   readUsagePagePreferences: () => ({ metric: state.metric, windowDays: 30 }),
@@ -91,6 +104,8 @@ beforeEach(() => {
   environmentNumber += 1;
   state.metric = "limits";
   state.refreshProviders.mockClear();
+  state.readUsage.mockClear();
+  state.kiro = undefined;
   state.presentations = new Map([
     [
       EnvironmentId.make(`test-${environmentNumber}`),
@@ -269,4 +284,79 @@ it("keeps manual refresh busy until the already-running automatic check settles"
     });
   }
   expect(button().props["aria-busy"]).toBe(false);
+});
+
+const kiroUsage: MergedKiroUsage = {
+  credits: 0.032456,
+  records: 2,
+  sessions: 1,
+  totalTokens: null,
+  tokenRecords: 0,
+  models: [
+    { model: "claude-sonnet-4", credits: 0.032456, records: 2, totalTokens: null, tokenRecords: 0 },
+  ],
+  daily: [{ day: "2026-09-11", credits: 0.032456 }],
+  partial: false,
+  unavailable: false,
+  messages: [],
+};
+
+const pageText = () =>
+  JSON.stringify(renderer.toJSON(), (key, value) => (key === "props" ? undefined : value));
+
+it("keeps Kiro credits separate while changing metrics and reporting periods", async () => {
+  state.metric = "cost";
+  state.kiro = kiroUsage;
+  await act(() => {
+    renderer = create(<UsagePage />);
+  });
+
+  expect(pageText()).toContain("Kiro credits");
+  expect(pageText()).toContain("0.032456");
+  expect(pageText()).toContain("Not reported");
+  expect(pageText()).not.toContain("$0.00");
+  expect(pageText()).not.toContain("Processed tokens");
+
+  const select = (label: string, value: string) =>
+    renderer.root
+      .findAll((node) => node.type === "div" && node.props["aria-label"] === label)[0]!
+      .props.onValueChange([value]);
+
+  await act(() => select("Usage metric", "tokens"));
+  expect(pageText()).toContain("0.032456");
+  expect(pageText()).toContain("Not reported");
+  await act(() => select("Usage period", "1"));
+  expect(state.readUsage).toHaveBeenLastCalledWith(expect.objectContaining({ resolution: "hour" }));
+  await act(() => select("Usage metric", "limits"));
+  expect(pageText()).not.toContain("Kiro credits");
+  await act(() => select("Usage metric", "cost"));
+  expect(pageText()).toContain("Kiro credits");
+});
+
+it("marks partial token coverage and replaces failed Kiro readings with unavailable", async () => {
+  state.metric = "tokens";
+  state.kiro = { ...kiroUsage, totalTokens: 1200, tokenRecords: 1 };
+  await act(() => {
+    renderer = create(<UsagePage />);
+  });
+  expect(pageText()).toContain("1.20K");
+  expect(pageText()).toContain("Token counts cover ");
+  expect(pageText()).toContain("records; the remaining records did not report tokens.");
+
+  state.kiro = {
+    ...kiroUsage,
+    credits: 0,
+    records: 0,
+    sessions: 0,
+    models: [],
+    unavailable: true,
+    messages: ["The selected environment could not read Kiro history."],
+  };
+  await act(() => renderer.update(<UsagePage />));
+  expect(pageText()).toContain("Unavailable");
+  expect(pageText()).toContain("could not read Kiro history");
+  expect(pageText()).not.toContain("Kiro did not report token counts");
+  expect(pageText()).not.toContain("Not reported");
+  expect(pageText()).not.toContain("0.032456");
+  expect(pageText()).not.toContain("$0.00");
 });

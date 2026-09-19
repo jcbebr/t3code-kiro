@@ -6,6 +6,8 @@ In **Settings → Providers**, add Kiro and enable it. If the executable is not 
 
 Select **Kiro default** for a new thread to keep the CLI's default model. After starting a session, the models reported by Kiro become available in the picker. Conversations can resume after restarting T3 as long as their Kiro session still exists.
 
+To track consumption, open **Usage → Cost** or **Tokens** in this fork's client and look for **Kiro credits**. It reads saved Kiro session history on the selected environments, including earlier sessions and work outside T3. Refresh after a turn to update the totals. Token counts appear only when the CLI records them; otherwise they read **Not reported**. Credits remain separate from dollar estimates and the other providers' token totals. Official T3 clients do not display this section; use the web interface served by your fork. See [Usage and limits](usage.md#kiro-credits) for coverage details.
+
 Kiro's native tool permissions still apply. Requests sent by Kiro appear in T3 with allow-once, deny, or cancel choices. Full access automatically accepts single-use requests; auto-accept-edits accepts edit requests. Other modes display requests for review. This does not override tools already trusted or denied by your Kiro configuration or organization.
 
 Set the text-generation model to Kiro as well if you want all auxiliary work to stay local. Source-control writing can inherit that setting. Thread titles and branch names use local text processing in this build. Automatic commit messages and pull-request descriptions are not available; enter them manually.

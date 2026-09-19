@@ -9,6 +9,8 @@
 import {
   USAGE_MERGE_COMPATIBLE_SINCE,
   type EnvironmentId,
+  type KiroUsageBucket,
+  type KiroUsageSourceFingerprint,
   type UsageBucket,
   type UsageProviderKind,
   type UsageSourceFingerprint,
@@ -75,6 +77,28 @@ export interface CostQuality {
   readonly cacheSavingsUsd: number;
 }
 
+export interface KiroModelTotals {
+  readonly model: string;
+  readonly credits: number;
+  readonly records: number;
+  readonly totalTokens: number | null;
+  readonly tokenRecords: number;
+}
+
+export interface MergedKiroUsage {
+  readonly credits: number;
+  readonly records: number;
+  readonly sessions: number;
+  /** Null means no record supplied token counts; credits cannot fill that gap. */
+  readonly totalTokens: number | null;
+  readonly tokenRecords: number;
+  readonly models: readonly KiroModelTotals[];
+  readonly daily: readonly { readonly day: string; readonly credits: number }[];
+  readonly partial: boolean;
+  readonly unavailable: boolean;
+  readonly messages: readonly string[];
+}
+
 export interface MergedUsage {
   readonly costUsd: number;
   readonly uncachedInputTokens: number;
@@ -94,6 +118,7 @@ export interface MergedUsage {
   readonly duplicateSources: readonly string[];
   readonly contributingEnvironments: readonly EnvironmentId[];
   readonly staleEnvironments: readonly EnvironmentId[];
+  readonly kiro?: MergedKiroUsage;
 }
 
 /**
@@ -176,7 +201,7 @@ function ownedContribution(
   };
 }
 
-function bucketTokens(bucket: UsageBucket): number {
+function bucketTokens(bucket: { readonly totals: UsageBucket["totals"] }): number {
   // reasoningTokens is a subset of outputTokens and must not be added again.
   return (
     bucket.totals.uncachedInputTokens +
@@ -184,6 +209,126 @@ function bucketTokens(bucket: UsageBucket): number {
     bucket.totals.cacheCreationTokens +
     bucket.totals.outputTokens
   );
+}
+
+function kiroFingerprintKey(fingerprint: KiroUsageSourceFingerprint): string {
+  return JSON.stringify([fingerprint.hostId, fingerprint.resolvedHomePath, fingerprint.volumeId]);
+}
+
+function kiroBucketTokenRecords(bucket: KiroUsageBucket): number {
+  return bucket.totals === undefined ? 0 : (bucket.tokenRecords ?? bucket.records);
+}
+
+const KIRO_SOURCE_PRIORITY = { ok: 0, partial: 1, failed: 2, missing: 3 };
+
+/** Keeps credit accounting separate from API price estimates and token totals. */
+function mergeKiroUsage(environments: readonly EnvironmentUsage[]): {
+  readonly usage?: MergedKiroUsage;
+  readonly duplicates: readonly string[];
+  readonly contributingEnvironments: readonly EnvironmentId[];
+} {
+  if (!environments.some((environment) => environment.summary.kiro !== undefined)) {
+    return { duplicates: [], contributingEnvironments: [] };
+  }
+
+  const claimed = new Set<string>();
+  const duplicates: string[] = [];
+  const contributingEnvironments: EnvironmentId[] = [];
+  const messages = new Set<string>();
+  const models = new Map<
+    string,
+    { credits: number; records: number; totalTokens: number; tokenRecords: number }
+  >();
+  const daily = new Map<string, number>();
+  let credits = 0;
+  let records = 0;
+  let sessions = 0;
+  let totalTokens = 0;
+  let tokenRecords = 0;
+  let partial = false;
+  let hasCompleteSource = false;
+  // Prefer a successful scan when another environment could not read the same
+  // source. Ties stay stable across renders through the environment id.
+  const ordered = environments
+    .flatMap((environment) =>
+      (environment.summary.kiro?.sources ?? []).map((source) => ({ environment, source })),
+    )
+    .sort(
+      (a, b) =>
+        KIRO_SOURCE_PRIORITY[a.source.status] - KIRO_SOURCE_PRIORITY[b.source.status] ||
+        a.environment.environmentId.localeCompare(b.environment.environmentId),
+    );
+
+  for (const { environment, source } of ordered) {
+    if (source.status !== "missing") {
+      const key = kiroFingerprintKey(source.fingerprint);
+      if (claimed.has(key)) {
+        duplicates.push(`${environment.label}: ${source.fingerprint.resolvedHomePath}`);
+        continue;
+      }
+      claimed.add(key);
+    }
+    partial ||= source.status !== "ok";
+    hasCompleteSource ||= source.status === "ok";
+    if (source.message !== null) messages.add(`${environment.label}: ${source.message}`);
+    if (source.status === "missing") continue;
+    sessions += source.distinctSessions;
+    if (
+      source.buckets.length > 0 &&
+      !contributingEnvironments.includes(environment.environmentId)
+    ) {
+      contributingEnvironments.push(environment.environmentId);
+    }
+
+    for (const bucket of source.buckets) {
+      const knownTokenRecords = kiroBucketTokenRecords(bucket);
+      const tokens =
+        bucket.totals !== undefined && knownTokenRecords > 0
+          ? bucketTokens({ totals: bucket.totals })
+          : 0;
+      credits += bucket.credits;
+      records += bucket.records;
+      tokenRecords += knownTokenRecords;
+      totalTokens += tokens;
+      const model = models.get(bucket.model) ?? {
+        credits: 0,
+        records: 0,
+        totalTokens: 0,
+        tokenRecords: 0,
+      };
+      model.credits += bucket.credits;
+      model.records += bucket.records;
+      model.totalTokens += tokens;
+      model.tokenRecords += knownTokenRecords;
+      models.set(bucket.model, model);
+      daily.set(bucket.day, (daily.get(bucket.day) ?? 0) + bucket.credits);
+    }
+  }
+
+  return {
+    usage: {
+      credits,
+      records,
+      sessions,
+      totalTokens: tokenRecords > 0 ? totalTokens : null,
+      tokenRecords,
+      models: [...models.entries()]
+        .map(([model, totals]) => ({
+          model,
+          ...totals,
+          totalTokens: totals.tokenRecords > 0 ? totals.totalTokens : null,
+        }))
+        .sort((a, b) => b.credits - a.credits || a.model.localeCompare(b.model)),
+      daily: [...daily.entries()]
+        .map(([day, dayCredits]) => ({ day, credits: dayCredits }))
+        .sort((a, b) => a.day.localeCompare(b.day)),
+      partial,
+      unavailable: !hasCompleteSource && records === 0,
+      messages: [...messages],
+    },
+    duplicates,
+    contributingEnvironments,
+  };
 }
 
 export function isCompatibleUsageContractVersion(version: number, expected: number): boolean {
@@ -419,6 +564,7 @@ export function mergeUsage(
   const hourly: HourlyTotals[] = [...hourlyAccumulator.values()].sort((a, b) =>
     a.hourStart.localeCompare(b.hourStart),
   );
+  const kiro = mergeKiroUsage(current);
 
   return {
     costUsd,
@@ -441,8 +587,11 @@ export function mergeUsage(
         records === 0 ? 0 : (records - providerReportedRecords - unpricedRecords) / records,
       cacheSavingsUsd,
     },
-    duplicateSources: duplicates,
-    contributingEnvironments,
+    duplicateSources: [...duplicates, ...kiro.duplicates],
+    contributingEnvironments: [
+      ...new Set([...contributingEnvironments, ...kiro.contributingEnvironments]),
+    ],
     staleEnvironments,
+    ...(kiro.usage === undefined ? {} : { kiro: kiro.usage }),
   };
 }

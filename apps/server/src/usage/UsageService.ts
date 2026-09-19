@@ -62,6 +62,7 @@ import {
   type ScanCache,
 } from "./usageScanCache.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
+import { makeKiroUsageReader } from "./kiroUsage.ts";
 
 const LITELLM_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -147,6 +148,7 @@ export const make = Effect.gen(function* () {
   const hostEnvironment = yield* HostProcessEnvironment;
 
   const fileCache: ScanCache = new Map();
+  const readKiroUsageSource = makeKiroUsageReader();
   let cacheDirty = false;
 
   const ratesCachePath = path.join(config.stateDir, "usage-model-rates.json");
@@ -237,6 +239,38 @@ export const make = Effect.gen(function* () {
         }),
     ),
   );
+
+  const readKiroUsage = Effect.fn("UsageService.readKiroUsage")(function* (
+    input: UsageSummaryInput,
+    settings: ServerSettingsValue,
+  ) {
+    const instances = Object.values(settings.providerInstances).filter(
+      (instance) => instance.driver === "kiro",
+    );
+    const environments = [
+      ...instances.map((instance) => ({
+        environment: mergeProviderInstanceEnvironment(instance.environment, hostEnvironment),
+        configured: true,
+      })),
+      { environment: hostEnvironment, configured: false },
+    ];
+    const seen = new Set<string>();
+    const sources = [];
+    for (const { environment, configured } of environments) {
+      const home = environment.HOME?.trim() || NodeOS.homedir();
+      const candidate = path.resolve(home, ".kiro", "sessions", "cli");
+      const directory = yield* fileSystem
+        .realPath(candidate)
+        .pipe(Effect.orElseSucceed(() => candidate));
+      if (seen.has(directory)) continue;
+      seen.add(directory);
+      const source = yield* Effect.promise(() =>
+        readKiroUsageSource({ ...input, directory, hostId: NodeOS.hostname() }),
+      );
+      if (source.status !== "missing" || configured) sources.push(source);
+    }
+    return sources.length > 0 ? { sources } : undefined;
+  });
 
   /** Resolves the transcript directory for each provider. */
   const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* (
@@ -484,9 +518,9 @@ export const make = Effect.gen(function* () {
     // Pricing only matters once records are aggregated, so the rate table
     // loads while transcripts stream instead of gating them: a cold rates
     // fetch on a slow network no longer delays the scan by its own timeout.
-    const [, scannedDirs] = yield* Effect.all(
-      [ensureRates(false), collectDirs(windowStartMs, settings)],
-      { concurrency: 2 },
+    const [, scannedDirs, kiro] = yield* Effect.all(
+      [ensureRates(false), collectDirs(windowStartMs, settings), readKiroUsage(input, settings)],
+      { concurrency: 3 },
     );
 
     const aggregator = new UsageAggregator({
@@ -574,6 +608,7 @@ export const make = Effect.gen(function* () {
       sources,
       pricing: pricing(),
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
+      ...(kiro === undefined ? {} : { kiro }),
     } satisfies UsageSummary;
   });
 

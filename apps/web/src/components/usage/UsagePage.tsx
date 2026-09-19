@@ -62,6 +62,7 @@ import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { UsageLimitsSection } from "./UsageLimits";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
+import { KiroUsageSection } from "./KiroUsageSection";
 import { UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
 import { PROVIDER_ORDER, PROVIDER_PRESENTATION, providersWithUsage } from "./usageProviders";
 import {
@@ -148,6 +149,8 @@ export function UsagePage() {
     [breakdown, merged.models, metric],
   );
   const activeProviders = useMemo(() => providersWithUsage(merged.providers), [merged.providers]);
+  const showProviderUsage =
+    merged.kiro === undefined || merged.records > 0 || merged.totalTokens > 0 || merged.costUsd > 0;
   const timeValueColumnWidth = `${60 / (activeProviders.length + 2)}%`;
 
   const selectWindow = (days: number) => {
@@ -374,6 +377,12 @@ export function UsagePage() {
 
         <ScrollArea className="min-h-0 flex-1">
           <WorkspacePageContainer width="wide">
+            {selectedEnvironments.length > 0 &&
+            !showingLimits &&
+            !isPending &&
+            merged.kiro !== undefined ? (
+              <KiroUsageSection usage={merged.kiro} />
+            ) : null}
             {selectedEnvironments.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 {environments.length === 0
@@ -384,7 +393,7 @@ export function UsagePage() {
               <UsageLimitsSection selectedEnvironmentIds={selectedEnvironmentIds} now={limitsNow} />
             ) : isPending ? (
               <UsageSkeleton />
-            ) : (
+            ) : !showProviderUsage ? null : (
               <>
                 <section className="grid gap-6 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
                   <div className="flex min-w-0 flex-col gap-5">

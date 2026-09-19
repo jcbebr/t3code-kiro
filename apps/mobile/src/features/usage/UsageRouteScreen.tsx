@@ -30,6 +30,7 @@ import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
 import { SettingsSection } from "../settings/components/SettingsSection";
 import { UsageDailyChart } from "./UsageDailyChart";
+import { KiroUsageSection } from "./KiroUsageSection";
 import { toggleUsageEnvironment } from "./usageEnvironmentSelection";
 import { useRefreshLimits } from "./UsageLimitsSection";
 import { UsageLimitsSection } from "./UsageLimitsPooled";
@@ -125,6 +126,8 @@ export function UsageRouteScreen() {
   const [refreshingUsage, setRefreshingUsage] = useState(false);
   const refreshingRef = useRef(false);
   const showingLimits = tab === "limits";
+  const showProviderUsage =
+    merged.kiro === undefined || merged.records > 0 || merged.totalTokens > 0 || merged.costUsd > 0;
   const selectWindow = (days: number) => {
     setWindowSelection({
       days,
@@ -311,19 +314,24 @@ export function UsageRouteScreen() {
                 </Text>
               ) : (
                 <>
-                  <ChartCard
-                    merged={merged}
-                    days={chartDays}
-                    daily={chartTotals}
-                    metric={metric}
-                    sinceDay={window.sinceDay}
-                    untilDay={window.untilDay}
-                    isPast24Hours={isPast24Hours}
-                    timeZone={window.timeZone}
-                  />
-                  <ProviderSection merged={merged} metric={metric} />
-                  <TotalsSection merged={merged} isPast24Hours={isPast24Hours} />
-                  <ModelsSection merged={merged} />
+                  {merged.kiro !== undefined ? <KiroUsageSection usage={merged.kiro} /> : null}
+                  {showProviderUsage ? (
+                    <>
+                      <ChartCard
+                        merged={merged}
+                        days={chartDays}
+                        daily={chartTotals}
+                        metric={metric}
+                        sinceDay={window.sinceDay}
+                        untilDay={window.untilDay}
+                        isPast24Hours={isPast24Hours}
+                        timeZone={window.timeZone}
+                      />
+                      <ProviderSection merged={merged} metric={metric} />
+                      <TotalsSection merged={merged} isPast24Hours={isPast24Hours} />
+                      <ModelsSection merged={merged} />
+                    </>
+                  ) : null}
                 </>
               )}
             </>

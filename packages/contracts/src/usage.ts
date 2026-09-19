@@ -154,6 +154,45 @@ export const UsageSource = Schema.Struct({
 });
 export type UsageSource = typeof UsageSource.Type;
 
+/** Kiro credits are provider billing units, not an API-equivalent USD cost. */
+export const KiroUsageBucket = Schema.Struct({
+  day: UsageDay,
+  hourStart: Schema.optional(TrimmedNonEmptyString),
+  model: TrimmedNonEmptyString,
+  credits: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+  records: NonNegativeInt,
+  sessions: NonNegativeInt,
+  /** Absent when the CLI records credits without token counts. */
+  totals: Schema.optional(UsageTokenTotals),
+  /** Records contributing real token counts, rather than estimates from credits. */
+  tokenRecords: Schema.optional(NonNegativeInt),
+});
+export type KiroUsageBucket = typeof KiroUsageBucket.Type;
+
+export const KiroUsageSourceFingerprint = Schema.Struct({
+  hostId: TrimmedNonEmptyString,
+  resolvedHomePath: TrimmedNonEmptyString,
+  volumeId: Schema.String,
+});
+export type KiroUsageSourceFingerprint = typeof KiroUsageSourceFingerprint.Type;
+
+export const KiroUsageSource = Schema.Struct({
+  fingerprint: KiroUsageSourceFingerprint,
+  status: UsageSourceStatus,
+  scannedFiles: NonNegativeInt,
+  skippedFiles: NonNegativeInt,
+  malformedRecords: NonNegativeInt,
+  distinctSessions: NonNegativeInt,
+  message: Schema.NullOr(TrimmedNonEmptyString),
+  buckets: Schema.Array(KiroUsageBucket),
+});
+export type KiroUsageSource = typeof KiroUsageSource.Type;
+
+export const KiroUsageSummary = Schema.Struct({
+  sources: Schema.Array(KiroUsageSource),
+});
+export type KiroUsageSummary = typeof KiroUsageSummary.Type;
+
 export const UsagePricingStatus = Schema.Literals(["fresh", "cached", "unavailable"]);
 export type UsagePricingStatus = typeof UsagePricingStatus.Type;
 
@@ -199,6 +238,8 @@ export const UsageSummary = Schema.Struct({
   pricing: UsagePricing,
   /** Wall-clock cost of the scan, surfaced in diagnostics. */
   scanDurationMs: NonNegativeInt,
+  /** Optional extension so older clients can still decode the standard providers. */
+  kiro: Schema.optional(KiroUsageSummary),
 });
 export type UsageSummary = typeof UsageSummary.Type;
 

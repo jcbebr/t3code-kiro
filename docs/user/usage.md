@@ -22,6 +22,21 @@ results appear as each one responds.
 If recent work is missing or a new model shows no cost, refresh to rescan session history and
 update model pricing.
 
+### Kiro credits
+
+In this fork, choose **Usage → Cost** or **Tokens** to see **Kiro credits** for the selected
+environments and period. On mobile, choose the **Usage** tab. Credits come from Kiro's saved
+session history, including work outside T3, and are shown separately from estimated dollar costs
+and other providers' tokens. Refresh after a turn to pick up newly saved usage.
+
+When the CLI does not save token counts, they appear as **Not reported**. Partial readings are
+marked; credits are never converted into tokens or dollars. This is the usage saved on your
+selected machines, not your organization's account-wide bill or remaining credit balance.
+
+This display requires the fork's web, desktop, or mobile client. Official clients can still
+connect to the server, but do not display Kiro usage. Open the web interface served by your fork
+to view it.
+
 ## Set custom model prices
 
 On web or desktop, open the environment dropdown on **Usage**, then choose **Model prices** to add,
