@@ -1,5 +1,8 @@
 import {
   type CustomModelSetting,
+  getKiroAgentSelection,
+  getKiroAgentSource,
+  withKiroAgentSelection,
   MODEL_SLUG_ALIASES_BY_PROVIDER,
   ModelCapabilities,
   type ModelSelection,
@@ -218,6 +221,11 @@ export function buildExplicitProviderOptionSelectionsFromDescriptors(
   const normalized = buildProviderOptionSelectionsFromDescriptors(descriptors)?.filter(
     (selection) => explicitIds.has(selection.id),
   );
+  // The Kiro agent belongs to the conversation, independently of the model's
+  // advertised tuning controls. Preserve it when normalizing those controls.
+  const kiroAgent = getKiroAgentSelection(selections);
+  if (kiroAgent !== undefined)
+    return [...withKiroAgentSelection(normalized, kiroAgent, getKiroAgentSource(selections))];
   return normalized && normalized.length > 0 ? normalized : undefined;
 }
 

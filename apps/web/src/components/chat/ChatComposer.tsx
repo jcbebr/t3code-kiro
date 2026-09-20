@@ -35,6 +35,9 @@ import type {
 import {
   ProviderDriverKind,
   ProviderInstanceId,
+  getKiroAgentSelection,
+  getKiroAgentSource,
+  withKiroAgentSelection,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
@@ -241,6 +244,13 @@ import {
 import { useEnvironmentQuery } from "~/state/query";
 import { useDebouncedValue } from "~/state/queries";
 import { ProviderModelPicker } from "./ProviderModelPicker";
+import { KiroAgentMenuContent, KiroAgentPicker } from "./KiroAgentPicker";
+import {
+  getKiroAgentSendBlockReason,
+  resolveKiroComposerAgent,
+  resolveKiroComposerAgentSource,
+} from "./kiroAgentSelection";
+import { useKiroAgentCatalog } from "./useKiroAgentCatalog";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
@@ -1870,10 +1880,105 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     projectModelSelection: activeProjectDefaultModelSelection,
     settings,
   });
-  const providerSendBlockReason = getAntigravitySendBlockReason(
-    selectedProviderEntry?.snapshot,
-    selectedModel,
+  const kiroAgentLocked =
+    threadShellHasStarted(props.activeThreadShell) ||
+    promptHistoryMessages.some((message) => message.role === "user");
+  const kiroAgentCatalog = useKiroAgentCatalog({
+    enabled: selectedProvider === "kiro" && !kiroAgentLocked,
+    environmentId,
+    instanceId: selectedInstanceId,
+    cwd: gitCwd,
+  });
+  const currentModelOptions = composerModelOptions?.[selectedInstanceId];
+  const selectedKiroAgent = resolveKiroComposerAgent({
+    locked: kiroAgentLocked,
+    threadSelection: activeThreadModelSelection,
+    draftOptions: currentModelOptions,
+    catalog: kiroAgentCatalog.catalog,
+  });
+  const selectedKiroAgentSource = resolveKiroComposerAgentSource({
+    locked: kiroAgentLocked,
+    threadSelection: activeThreadModelSelection,
+    draftOptions: currentModelOptions,
+    catalog: kiroAgentCatalog.catalog,
+  });
+  const kiroAgentSendBlockReason =
+    selectedProvider === "kiro"
+      ? getKiroAgentSendBlockReason({
+          locked: kiroAgentLocked,
+          cwd: gitCwd,
+          catalog: kiroAgentCatalog.catalog,
+          error: kiroAgentCatalog.error,
+          agent: selectedKiroAgent,
+          source: selectedKiroAgentSource,
+        })
+      : null;
+  const effectiveModelOptions = useMemo(
+    () =>
+      selectedProvider === "kiro"
+        ? withKiroAgentSelection(
+            withKiroAgentSelection(currentModelOptions, undefined),
+            selectedKiroAgent ?? undefined,
+            selectedKiroAgentSource,
+          )
+        : currentModelOptions,
+    [currentModelOptions, selectedKiroAgent, selectedKiroAgentSource, selectedProvider],
   );
+  const selectKiroAgent = useCallback(
+    (agent: string) => {
+      if (kiroAgentLocked || selectedProvider !== "kiro") return;
+      const entry = kiroAgentCatalog.catalog?.agents.find((candidate) => candidate.name === agent);
+      if (!entry) return;
+      useComposerDraftStore
+        .getState()
+        .setProviderModelOptions(
+          composerDraftTarget,
+          selectedProvider,
+          withKiroAgentSelection(currentModelOptions, agent, entry.source),
+          { instanceId: selectedInstanceId, model: selectedModel },
+        );
+    },
+    [
+      composerDraftTarget,
+      currentModelOptions,
+      kiroAgentCatalog.catalog,
+      kiroAgentLocked,
+      selectedInstanceId,
+      selectedModel,
+      selectedProvider,
+    ],
+  );
+  useEffect(() => {
+    if (
+      selectedProvider !== "kiro" ||
+      kiroAgentLocked ||
+      kiroAgentSendBlockReason !== null ||
+      !selectedKiroAgent ||
+      (getKiroAgentSelection(currentModelOptions) && getKiroAgentSource(currentModelOptions))
+    )
+      return;
+    useComposerDraftStore
+      .getState()
+      .setModelSelection(
+        composerDraftTarget,
+        createModelSelection(selectedInstanceId, selectedModel, effectiveModelOptions),
+        { explicit: composerDraft.modelSelectionExplicit === true },
+      );
+  }, [
+    composerDraft.modelSelectionExplicit,
+    composerDraftTarget,
+    currentModelOptions,
+    effectiveModelOptions,
+    kiroAgentLocked,
+    kiroAgentSendBlockReason,
+    selectedInstanceId,
+    selectedKiroAgent,
+    selectedModel,
+    selectedProvider,
+  ]);
+  const providerSendBlockReason =
+    kiroAgentSendBlockReason ??
+    getAntigravitySendBlockReason(selectedProviderEntry?.snapshot, selectedModel);
   const sendDisabledReason =
     externalSendDisabledReason ??
     (activePendingProgress
@@ -1961,13 +2066,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         model: selectedModel,
         models: selectedProviderModels,
         promptInjectionState: composerPromptInjectionState,
-        modelOptions: composerModelOptions?.[selectedInstanceId],
+        modelOptions: effectiveModelOptions,
         planModeEnabled: settings.planModeEnabled,
       }),
     [
-      composerModelOptions,
+      effectiveModelOptions,
       composerPromptInjectionState,
-      selectedInstanceId,
       selectedModel,
       selectedProvider,
       selectedProviderModels,
@@ -4843,7 +4947,35 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     size: "xs",
     hidden: composerControlsHidden || restingHiddenBlockCount > 1,
   });
+  const kiroAgentPickerProps = {
+    agent: selectedKiroAgent,
+    source: selectedKiroAgentSource,
+    locked: kiroAgentLocked,
+    catalog: kiroAgentCatalog.catalog,
+    loading: kiroAgentCatalog.loading,
+    error: kiroAgentCatalog.error,
+    onSelect: selectKiroAgent,
+    onRefresh: () => void kiroAgentCatalog.refresh(),
+  };
+  const kiroAgentMenuContent =
+    selectedProvider === "kiro" ? <KiroAgentMenuContent {...kiroAgentPickerProps} /> : undefined;
   const restingBlockDefs = [
+    ...(selectedProvider === "kiro"
+      ? [
+          {
+            id: "kiro-agent",
+            content: (
+              <KiroAgentPicker
+                {...kiroAgentPickerProps}
+                size={composerControlsInStrip ? "xs" : "sm"}
+                hidden={
+                  composerControlsHidden || restingHiddenBlockCount > (providerTraitsPicker ? 2 : 1)
+                }
+              />
+            ),
+          },
+        ]
+      : []),
     ...(providerTraitsPicker
       ? [
           {
@@ -4953,6 +5085,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           runtimeMode={runtimeMode}
           showInteractionModeToggle={planModeUiEnabled}
           traitsMenuContent={providerTraitsMenuContent}
+          kiroAgentMenuContent={kiroAgentMenuContent}
           onToggleInteractionMode={toggleInteractionMode}
           onRuntimeModeChange={handleRuntimeModeChange}
         />
@@ -4998,6 +5131,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 }
                 traitsMenuContent={
                   hiddenRestingBlockIds.includes("traits") ? providerTraitsMenuContent : undefined
+                }
+                kiroAgentMenuContent={
+                  hiddenRestingBlockIds.includes("kiro-agent") ? kiroAgentMenuContent : undefined
                 }
                 onToggleInteractionMode={toggleInteractionMode}
                 onRuntimeModeChange={handleRuntimeModeChange}

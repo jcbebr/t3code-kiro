@@ -4,9 +4,11 @@ import { expect, it } from "@effect/vitest";
 import {
   ApprovalRequestId,
   KiroSettings,
+  KIRO_DEFAULT_AGENT,
   ProviderInstanceId,
   ThreadId,
   type ProviderRuntimeEvent,
+  type KiroAgentSource,
   type RuntimeMode,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -20,7 +22,7 @@ import * as Stream from "effect/Stream";
 import type * as AcpSchema from "effect-acp/schema";
 import * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import { KIRO_DEFAULT_MODEL } from "../acp/KiroAcpSupport.ts";
-import { makeKiroAdapter } from "./KiroAdapter.ts";
+import { makeKiroAdapter, type KiroAdapterOptions } from "./KiroAdapter.ts";
 
 const instanceId = ProviderInstanceId.make("kiro-test");
 const threadId = ThreadId.make("kiro-thread");
@@ -31,6 +33,8 @@ const settings = Schema.decodeSync(KiroSettings)({ enabled: true });
 
 const makeHarness = Effect.fn("KiroTest.makeHarness")(function* (
   environment: NodeJS.ProcessEnv = {},
+  providerSettings = settings,
+  reportedAgent?: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const crypto = yield* Crypto.Crypto;
@@ -41,10 +45,12 @@ const makeHarness = Effect.fn("KiroTest.makeHarness")(function* (
   const requests: AcpSessionRuntime.AcpSessionRequestLogEvent[] = [];
   const responses: AcpSchema.RequestPermissionResponse[] = [];
   const runtimes: AcpSessionRuntime.AcpSessionRuntime["Service"][] = [];
-  const adapter = yield* makeKiroAdapter(settings, {
+  const runtimeInputs: Parameters<KiroAdapterOptions["makeRuntime"]>[0][] = [];
+  const adapter = yield* makeKiroAdapter(providerSettings, {
     instanceId,
     makeRuntime: (input) =>
       Effect.gen(function* () {
+        runtimeInputs.push(input);
         const runtime = yield* AcpSessionRuntime.make({
           ...input,
           spawn: { command: process.execPath, args: [fixture], cwd: input.cwd, env: environment },
@@ -59,6 +65,20 @@ const makeHarness = Effect.fn("KiroTest.makeHarness")(function* (
         runtimes.push(runtime);
         return {
           ...runtime,
+          start: () =>
+            runtime.start().pipe(
+              Effect.map((started) => ({
+                ...started,
+                sessionSetupResult: {
+                  ...started.sessionSetupResult,
+                  modes: {
+                    ...started.sessionSetupResult.modes,
+                    currentModeId: reportedAgent ?? input.agent ?? "ask",
+                    availableModes: started.sessionSetupResult.modes?.availableModes ?? [],
+                  },
+                },
+              })),
+            ),
           handleRequestPermission: (
             handler: Parameters<typeof runtime.handleRequestPermission>[0],
           ) =>
@@ -92,17 +112,155 @@ const makeHarness = Effect.fn("KiroTest.makeHarness")(function* (
       if (event.type === type) return event as Extract<ProviderRuntimeEvent, { type: T }>;
     }
   });
-  const start = (mode: RuntimeMode = "approval-required", resumeCursor?: unknown, id = threadId) =>
+  const start = (
+    mode: RuntimeMode = "approval-required",
+    resumeCursor?: unknown,
+    id = threadId,
+    agent?: string,
+    agentSource?: KiroAgentSource,
+  ) =>
     adapter.startSession({
       threadId: id,
       providerInstanceId: instanceId,
       cwd,
       runtimeMode: mode,
-      modelSelection: { instanceId, model: KIRO_DEFAULT_MODEL },
+      modelSelection: {
+        instanceId,
+        model: KIRO_DEFAULT_MODEL,
+        ...(agent
+          ? {
+              options: [
+                { id: "kiroAgent", value: agent },
+                ...(agentSource ? [{ id: "kiroAgentSource", value: agentSource }] : []),
+              ],
+            }
+          : {}),
+      },
       ...(resumeCursor === undefined ? {} : { resumeCursor }),
     });
-  return { adapter, start, waitFor, seen, requests, responses, runtimes, cwd };
+  return { adapter, start, waitFor, seen, requests, responses, runtimes, runtimeInputs, cwd };
 });
+
+it.effect("runs independent thread agents and retains the selected agent when resuming", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness({}, { ...settings, agent: "environment-agent" });
+    const selected = yield* h.start("approval-required", undefined, threadId, "project-agent");
+    const other = ThreadId.make("default-agent-thread");
+    yield* h.start("approval-required", undefined, other, KIRO_DEFAULT_AGENT);
+    expect(h.runtimeInputs.map((input) => input.agent)).toEqual([
+      "project-agent",
+      KIRO_DEFAULT_AGENT,
+    ]);
+    expect(selected.resumeCursor).toMatchObject({ agent: "project-agent" });
+    yield* h.adapter.stopSession(threadId);
+    yield* h.start("approval-required", selected.resumeCursor);
+    expect(h.runtimeInputs.at(-1)?.agent).toBe("project-agent");
+    expect(h.requests.some((event) => event.method === "session/load")).toBe(true);
+    // An official client has no kiroAgent option but must keep the pinned agent.
+    yield* h.adapter.sendTurn({
+      threadId,
+      input: "Continue with the same agent",
+      modelSelection: { instanceId, model: KIRO_DEFAULT_MODEL },
+    });
+    expect((yield* h.waitFor("turn.completed")).payload.state).toBe("completed");
+    expect(yield* h.adapter.hasSession(other)).toBe(true);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("pins agent source on resume and rejects changing only its source", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness();
+    const session = yield* h.start("approval-required", undefined, threadId, "reviewer", "project");
+    expect(h.runtimeInputs[0]).toMatchObject({ agent: "reviewer", agentSource: "project" });
+    expect(session.resumeCursor).toMatchObject({ agent: "reviewer", agentSource: "project" });
+    const turnError = yield* h.adapter
+      .sendTurn({
+        threadId,
+        input: "Switch agent scope",
+        modelSelection: {
+          instanceId,
+          model: KIRO_DEFAULT_MODEL,
+          options: [
+            { id: "kiroAgent", value: "reviewer" },
+            { id: "kiroAgentSource", value: "global" },
+          ],
+        },
+      })
+      .pipe(Effect.flip);
+    expect(turnError).toMatchObject({ _tag: "ProviderAdapterValidationError" });
+    yield* h.adapter.stopSession(threadId);
+    const resumeError = yield* h
+      .start("approval-required", session.resumeCursor, threadId, "reviewer", "global")
+      .pipe(Effect.flip);
+    expect(resumeError).toMatchObject({ _tag: "ProviderAdapterValidationError" });
+    yield* h.start("approval-required", session.resumeCursor, threadId, "reviewer");
+    expect(h.runtimeInputs.at(-1)).toMatchObject({ agent: "reviewer", agentSource: "project" });
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("preserves native defaults and legacy cursors, then pins the resolved agent", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness();
+    const initial = yield* h.start();
+    expect(h.runtimeInputs[0]?.agent).toBeUndefined();
+    // The mock reports its selected ACP mode, standing in for Kiro's agent name.
+    expect(initial.resumeCursor).toMatchObject({ agent: "ask" });
+    yield* h.adapter.stopSession(threadId);
+    yield* h.start("approval-required", initial.resumeCursor);
+    expect(h.runtimeInputs.at(-1)?.agent).toBe("ask");
+    yield* h.adapter.stopSession(threadId);
+    const legacy = yield* h.start("approval-required", {
+      schemaVersion: 1,
+      sessionId: "legacy-session",
+    });
+    expect(h.runtimeInputs.at(-1)?.agent).toBeUndefined();
+    expect(legacy.resumeCursor).toMatchObject({ agent: "ask" });
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("rejects changing an agent on live and resumed sessions before prompting", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness();
+    const initial = yield* h.start("approval-required", undefined, threadId, "reviewer");
+    const changed = yield* h.adapter
+      .sendTurn({
+        threadId,
+        input: "Change agents",
+        modelSelection: {
+          instanceId,
+          model: KIRO_DEFAULT_MODEL,
+          options: [{ id: "kiroAgent", value: "writer" }],
+        },
+      })
+      .pipe(Effect.flip);
+    expect(changed).toMatchObject({ _tag: "ProviderAdapterValidationError" });
+    expect(h.requests.some((event) => event.method === "session/prompt")).toBe(false);
+    const changedLive = yield* h
+      .start("approval-required", undefined, threadId, "writer")
+      .pipe(Effect.flip);
+    expect(changedLive).toMatchObject({ _tag: "ProviderAdapterValidationError" });
+    expect(yield* h.adapter.hasSession(threadId)).toBe(true);
+    yield* h.adapter.stopSession(threadId);
+    const changedResume = yield* h
+      .start("approval-required", initial.resumeCursor, threadId, "writer")
+      .pipe(Effect.flip);
+    expect(changedResume).toMatchObject({ _tag: "ProviderAdapterValidationError" });
+    expect(h.runtimeInputs).toHaveLength(1);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("fails before prompting when Kiro silently falls back to another agent", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness({}, settings, KIRO_DEFAULT_AGENT);
+    const result = yield* h
+      .start("approval-required", undefined, threadId, "missing-agent")
+      .pipe(Effect.flip);
+    expect(result).toMatchObject({ _tag: "ProviderAdapterValidationError" });
+    expect(result.message).toContain("missing-agent");
+    expect(yield* h.adapter.hasSession(threadId)).toBe(false);
+    expect(h.requests.some((event) => event.method === "session/prompt")).toBe(false);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
 
 it.effect(
   "uses the native login, streams two turns, and never sends the default alias to set_model",

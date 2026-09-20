@@ -73,6 +73,20 @@ const ULTRATHINK_FRAME_CLASSES = {
 } as const;
 
 describe("getComposerProviderState", () => {
+  it("dispatches a Kiro thread agent independently of the model's trait descriptors", () => {
+    const state = getComposerProviderState({
+      provider: ProviderDriverKind.make("kiro"),
+      model: "auto",
+      models: [{ slug: "auto", name: "Auto", isCustom: false, capabilities: {} }],
+      modelOptions: selections(["kiroAgent", "reviewer"], ["kiroAgentSource", "project"]),
+      planModeEnabled: false,
+    });
+    expect(state.modelOptionsForDispatch).toEqual(
+      selections(["kiroAgent", "reviewer"], ["kiroAgentSource", "project"]),
+    );
+    expect(state.promptEffort).toBeNull();
+  });
+
   it("derives a stable prompt injection state for ordinary prompt edits", () => {
     expect(getComposerPromptInjectionState("Investigate this failure")).toBe("none");
     expect(getComposerPromptInjectionState("Ultrathink:\nInvestigate this failure")).toBe(

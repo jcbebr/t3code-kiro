@@ -5,6 +5,7 @@ import {
   ComposerContextId,
   ComposerContextRecord,
   COMPOSER_CONTEXT_MAX_RECORDS,
+  withKiroAgentSelection,
   ForwardCompatibleArray,
   OrchestrationMessageContext,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -1244,7 +1245,12 @@ function updateComposerDrafts(
 }
 
 export function setStickyComposerModelSelection(modelSelection: ModelSelection): void {
-  appAtomRegistry.set(stickyComposerModelSelectionAtom, modelSelection);
+  // Agent profiles are local to a project's environment, unlike the app-wide
+  // last-used model. Each new draft resolves its own agent catalog.
+  appAtomRegistry.set(stickyComposerModelSelectionAtom, {
+    ...modelSelection,
+    options: withKiroAgentSelection(modelSelection.options, undefined),
+  });
   schedulePersistComposerState();
 }
 

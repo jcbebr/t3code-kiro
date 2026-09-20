@@ -14,6 +14,9 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   DEFAULT_SERVER_SETTINGS,
+  getKiroAgentSelection,
+  getKiroAgentSource,
+  withKiroAgentSelection,
   MessageId,
   T3_PROJECT_FILE_NAME,
   ThreadId,
@@ -549,7 +552,26 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       if (!option) {
         return;
       }
-      const selection = options ? { ...option.selection, options } : option.selection;
+      const selectedOptions = options ?? option.selection.options;
+      const kiroAgent =
+        option.providerDriver === "kiro" &&
+        selectedModel?.instanceId === option.selection.instanceId
+          ? getKiroAgentSelection(selectedModel.options)
+          : undefined;
+      const selection = {
+        ...option.selection,
+        ...(kiroAgent !== undefined
+          ? {
+              options: withKiroAgentSelection(
+                selectedOptions,
+                kiroAgent,
+                getKiroAgentSource(selectedModel?.options),
+              ),
+            }
+          : selectedOptions
+            ? { options: selectedOptions }
+            : {}),
+      };
       const provider = selectedEnvironmentServerConfig?.providers.find(
         (candidate) => candidate.instanceId === selection.instanceId,
       );
@@ -561,15 +583,25 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       });
       setStickyComposerModelSelection(selection);
     },
-    [modelOptions, selectedEnvironmentServerConfig, selectedProjectDraftKey],
+    [modelOptions, selectedEnvironmentServerConfig, selectedProjectDraftKey, selectedModel],
   );
   const setSelectedModelOptions = useCallback(
     (options: ReadonlyArray<ProviderOptionSelection> | undefined) => {
       if (!selectedModel || !selectedProjectDraftKey) {
         return;
       }
-      const nextSelection: ModelSelection = options
-        ? { ...selectedModel, options }
+      const agent =
+        selectedProviderStatus?.driver === "kiro"
+          ? (getKiroAgentSelection(options) ?? getKiroAgentSelection(selectedModel.options))
+          : undefined;
+      const source =
+        getKiroAgentSource(options) ??
+        (agent === getKiroAgentSelection(selectedModel.options)
+          ? getKiroAgentSource(selectedModel.options)
+          : undefined);
+      const nextOptions = agent ? withKiroAgentSelection(options, agent, source) : options;
+      const nextSelection: ModelSelection = nextOptions
+        ? { ...selectedModel, options: nextOptions }
         : {
             instanceId: selectedModel.instanceId,
             model: selectedModel.model,
@@ -579,7 +611,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       });
       setStickyComposerModelSelection(nextSelection);
     },
-    [selectedModel, selectedProjectDraftKey],
+    [selectedModel, selectedProjectDraftKey, selectedProviderStatus?.driver],
   );
 
   const providerGroups = useMemo(() => groupByProvider(modelOptions), [modelOptions]);

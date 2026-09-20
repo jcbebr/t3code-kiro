@@ -5,6 +5,11 @@ import type {
   ProjectId,
   ScopedProjectRef,
 } from "@t3tools/contracts";
+import {
+  KIRO_AGENT_OPTION_ID,
+  KIRO_AGENT_SOURCE_OPTION_ID,
+  withKiroAgentSelection,
+} from "@t3tools/contracts";
 import type { ComposerThreadDraftState, DraftThreadEnvMode } from "../composerDraftStore";
 
 type ComposerModelSelectionState = Pick<
@@ -50,10 +55,22 @@ export function resolveNewThreadModelSelectionOverride(input: {
   readonly carrySourceDraftId: string | null;
   readonly destinationDraftId: string;
 }): ModelSelection | null {
-  return (
-    input.projectDefaultSelection ??
-    (input.carrySourceDraftId === input.destinationDraftId ? null : input.carrySelection)
-  );
+  if (input.projectDefaultSelection) return input.projectDefaultSelection;
+  if (input.carrySourceDraftId === input.destinationDraftId) return null;
+  const selection = input.carrySelection;
+  if (
+    !selection?.options?.some(
+      (option) => option.id === KIRO_AGENT_OPTION_ID || option.id === KIRO_AGENT_SOURCE_OPTION_ID,
+    )
+  )
+    return selection;
+  // A fresh conversation resolves its own environment/project agent. The
+  // previous conversation's model and model traits can still carry forward.
+  const { options, ...modelSelection } = selection;
+  const carriedOptions = withKiroAgentSelection(options, undefined);
+  return carriedOptions.length > 0
+    ? { ...modelSelection, options: carriedOptions }
+    : modelSelection;
 }
 
 export function hasExplicitComposerModelSelection(

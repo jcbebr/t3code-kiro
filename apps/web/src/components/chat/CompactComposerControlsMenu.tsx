@@ -18,6 +18,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   runtimeMode: RuntimeMode;
   showInteractionModeToggle: boolean;
   traitsMenuContent?: ReactNode;
+  kiroAgentMenuContent?: ReactNode;
   size?: "sm" | "xs";
   /**
    * The resting strip keeps this menu mounted out of flow while every block
@@ -50,6 +51,12 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
         <ComposerControlIcon icon={EllipsisIcon} size={size} />
       </MenuTrigger>
       <MenuPopup align="start" {...composerFloatingLayerProps}>
+        {props.kiroAgentMenuContent ? (
+          <>
+            {props.kiroAgentMenuContent}
+            <MenuDivider />
+          </>
+        ) : null}
         {props.traitsMenuContent ? (
           <>
             {props.traitsMenuContent}

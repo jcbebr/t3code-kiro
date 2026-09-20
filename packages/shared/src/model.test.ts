@@ -130,6 +130,25 @@ describe("descriptor helpers", () => {
     ).toEqual([{ id: "fastMode", value: true }]);
   });
 
+  it("preserves a thread's Kiro agent without exposing it as a model tuning option", () => {
+    expect(
+      buildExplicitProviderOptionSelectionsFromDescriptors(
+        [],
+        [
+          { id: "kiroAgent", value: "reviewer" },
+          { id: "kiroAgentSource", value: "project" },
+          { id: "unsupportedOption", value: "discard" },
+        ],
+      ),
+    ).toEqual([
+      { id: "kiroAgent", value: "reviewer" },
+      { id: "kiroAgentSource", value: "project" },
+    ]);
+    expect(
+      buildExplicitProviderOptionSelectionsFromDescriptors([], [{ id: "kiroAgent", value: false }]),
+    ).toBeUndefined();
+  });
+
   it("stores option selection arrays in model selections", () => {
     expect(
       createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.4", [

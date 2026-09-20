@@ -76,6 +76,71 @@ describe("chatThreadActions", () => {
     ).toEqual(CARRIED_SELECTION);
   });
 
+  it.each([null, "draft-source"])(
+    "does not carry a Kiro agent from %s into a fresh conversation",
+    (carrySourceDraftId) => {
+      const selection: ModelSelection = {
+        instanceId: ProviderInstanceId.make("kiro_company"),
+        model: "claude-sonnet-4.5",
+        options: [
+          { id: "kiroAgent", value: "global-reviewer" },
+          { id: "kiroAgentSource", value: "global" },
+          { id: "thinking", value: true },
+        ],
+      };
+      expect(
+        resolveNewThreadModelSelectionOverride({
+          projectDefaultSelection: null,
+          carrySelection: selection,
+          carrySourceDraftId,
+          destinationDraftId: "draft-new",
+        }),
+      ).toEqual({
+        instanceId: selection.instanceId,
+        model: selection.model,
+        options: [{ id: "thinking", value: true }],
+      });
+      expect(selection.options).toContainEqual({ id: "kiroAgent", value: "global-reviewer" });
+    },
+  );
+
+  it("resets an agent-only carried selection to the model without options", () => {
+    expect(
+      resolveNewThreadModelSelectionOverride({
+        projectDefaultSelection: null,
+        carrySelection: {
+          instanceId: ProviderInstanceId.make("kiro"),
+          model: "auto",
+          options: [
+            { id: "kiroAgent", value: "global-reviewer" },
+            { id: "kiroAgentSource", value: "global" },
+          ],
+        },
+        carrySourceDraftId: null,
+        destinationDraftId: "draft-new",
+      }),
+    ).toEqual({ instanceId: ProviderInstanceId.make("kiro"), model: "auto" });
+  });
+
+  it("honors an explicitly configured project agent instead of inheriting the old thread agent", () => {
+    const projectDefaultSelection: ModelSelection = {
+      instanceId: ProviderInstanceId.make("kiro"),
+      model: "auto",
+      options: [{ id: "kiroAgent", value: "project-default" }],
+    };
+    expect(
+      resolveNewThreadModelSelectionOverride({
+        projectDefaultSelection,
+        carrySelection: {
+          ...projectDefaultSelection,
+          options: [{ id: "kiroAgent", value: "old" }],
+        },
+        carrySourceDraftId: null,
+        destinationDraftId: "draft-new",
+      }),
+    ).toEqual(projectDefaultSelection);
+  });
+
   it("keeps the project default above any carried selection", () => {
     expect(
       resolveNewThreadModelSelectionOverride({

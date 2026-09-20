@@ -1059,6 +1059,11 @@ export function createServerEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => JSON.stringify([environmentId, input]),
       },
     }),
+    getKiroAgents: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:kiro-agents",
+      tag: WS_METHODS.serverGetKiroAgents,
+      staleTimeMs: 15_000,
+    }),
     refreshProviders: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:refresh-providers",
       tag: WS_METHODS.serverRefreshProviders,

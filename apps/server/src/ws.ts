@@ -108,6 +108,7 @@ import {
   observeRpcStreamEffect as instrumentRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import { readKiroAgentCatalog } from "./provider/kiroAgentCatalog.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "./provider/Services/ProviderSessionDirectory.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
@@ -2347,6 +2348,10 @@ const makeWsRpcLayer = (
             }),
             { "rpc.aggregate": "server" },
           ),
+        [WS_METHODS.serverGetKiroAgents]: (input) =>
+          observeRpcEffect(WS_METHODS.serverGetKiroAgents, readKiroAgentCatalog(input), {
+            "rpc.aggregate": "server",
+          }),
         [WS_METHODS.providerUploadFeedback]: (input) =>
           observeRpcEffect(
             WS_METHODS.providerUploadFeedback,

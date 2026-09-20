@@ -29,6 +29,10 @@ import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { useFontFamily } from "../../lib/useFontFamily";
 
 import {
+  getKiroAgentSelection,
+  getKiroAgentSource,
+  KIRO_DEFAULT_AGENT,
+  withKiroAgentSelection,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   resolveEnvironmentMachineKind,
@@ -53,6 +57,8 @@ import {
 import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
 import { ComposerAttachmentButton } from "../../components/ComposerAttachmentButton";
 import { ComposerAttachmentStrip } from "../../components/ComposerAttachmentStrip";
+import { KiroAgentPicker } from "./KiroAgentPicker";
+import { useKiroAgents } from "./use-kiro-agents";
 import { composerStripAttachments } from "../../lib/composerImages";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
 import {
@@ -207,6 +213,35 @@ export function NewTaskDraftScreen(props: {
       (environment) => environment.environmentId === selectedProject.environmentId,
     )?.connectionState === "connected";
   const modelUnavailable = environmentConnected && flow.selectedModelOption?.isUnavailable === true;
+  const isKiro = flow.selectedModelOption?.providerDriver === "kiro";
+  const kiroAgents = useKiroAgents({
+    environmentId: selectedProject?.environmentId ?? null,
+    instanceId: flow.selectedModel?.instanceId ?? null,
+    cwd: flow.selectedWorktreePath ?? selectedProject?.workspaceRoot ?? null,
+    enabled: isKiro && environmentConnected,
+  });
+  const { setSelectedModelOptions } = flow;
+  const selectedKiroOptions = flow.selectedModel?.options;
+  const selectedKiroAgent = getKiroAgentSelection(selectedKiroOptions);
+  const selectedKiroSource = getKiroAgentSource(selectedKiroOptions);
+  useEffect(() => {
+    if (!isKiro || !kiroAgents.catalog || getKiroAgentSource(selectedKiroOptions)) return;
+    const agentName = selectedKiroAgent ?? kiroAgents.catalog.defaultAgent ?? KIRO_DEFAULT_AGENT;
+    const source = kiroAgents.catalog.agents.find((agent) => agent.name === agentName)?.source;
+    if (!source) return;
+    setSelectedModelOptions(withKiroAgentSelection(selectedKiroOptions, agentName, source));
+  }, [isKiro, kiroAgents.catalog, selectedKiroAgent, selectedKiroOptions, setSelectedModelOptions]);
+  const kiroAgentBlocked =
+    isKiro &&
+    (selectedKiroAgent === undefined ||
+      (environmentConnected &&
+        (kiroAgents.loading ||
+          kiroAgents.error !== null ||
+          !kiroAgents.catalog?.agents.some(
+            (agent) =>
+              agent.name === selectedKiroAgent &&
+              (!selectedKiroSource || agent.source === selectedKiroSource),
+          ))));
   // A project added by cloning exists before its files do: the prompt can be
   // written meanwhile, but Start waits for the clone.
   const projectCloneState = useProjectClone(
@@ -1172,7 +1207,12 @@ export function NewTaskDraftScreen(props: {
   );
 
   async function handleStart(): Promise<void> {
-    if (voiceInput.blocksSubmission || pendingPastedTextAttachmentCountRef.current > 0) return;
+    if (
+      voiceInput.blocksSubmission ||
+      pendingPastedTextAttachmentCountRef.current > 0 ||
+      kiroAgentBlocked
+    )
+      return;
     const selectedProject = flow.selectedProject;
     const draftKey = flow.draftKey;
     if (!selectedProject || !draftKey) {
@@ -1337,6 +1377,7 @@ export function NewTaskDraftScreen(props: {
     !cloneBlocksStart &&
     attachmentBlockReason === null &&
     !modelUnavailable &&
+    !kiroAgentBlocked &&
     Boolean(flow.selectedProject) &&
     Boolean(flow.selectedModel) &&
     flow.prompt.trim().length > 0 &&
@@ -1685,6 +1726,29 @@ export function NewTaskDraftScreen(props: {
                         onPress={settingsSheetPresentation.open}
                       />
                     </View>
+                    {isKiro ? (
+                      <KiroAgentPicker
+                        selectedAgent={selectedKiroAgent}
+                        selectedSource={selectedKiroSource}
+                        catalog={kiroAgents.catalog}
+                        loading={kiroAgents.loading}
+                        error={kiroAgents.error}
+                        disabled={isComposerInteractionLocked}
+                        onSelect={(agent) =>
+                          flow.setSelectedModelOptions(
+                            withKiroAgentSelection(
+                              flow.selectedModel?.options,
+                              agent,
+                              kiroAgents.catalog?.agents.find((entry) => entry.name === agent)
+                                ?.source,
+                            ),
+                          )
+                        }
+                        onRefresh={() => {
+                          void kiroAgents.refresh();
+                        }}
+                      />
+                    ) : null}
                     {flow.planModeEnabled ? (
                       <ComposerInlineControl
                         accessibilityHint={`Switches to ${flow.interactionMode === "plan" ? "Build" : "Plan"} mode`}

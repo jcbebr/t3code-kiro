@@ -2302,11 +2302,68 @@ describe("composerDraftStore setModelSelection", () => {
       draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[CODEX_INSTANCE],
     ).toEqual(modelSelection(CODEX_DRIVER, "gpt-5.3-codex"));
   });
+
+  it("keeps the Kiro agent when changing models without leaking it to another provider", () => {
+    const store = useComposerDraftStore.getState();
+    const instanceId = ProviderInstanceId.make("kiro");
+    store.setModelSelection(threadRef, {
+      instanceId,
+      model: "auto",
+      options: [
+        { id: "kiroAgent", value: "reviewer" },
+        { id: "kiroAgentSource", value: "project" },
+      ],
+    });
+    store.setModelSelection(threadRef, { instanceId, model: "claude-sonnet-4.5" });
+    store.setModelSelection(threadRef, modelSelection(CODEX_DRIVER, "gpt-5.4"));
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[instanceId]).toEqual({
+      instanceId,
+      model: "claude-sonnet-4.5",
+      options: [
+        { id: "kiroAgent", value: "reviewer" },
+        { id: "kiroAgentSource", value: "project" },
+      ],
+    });
+    expect(
+      draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[CODEX_INSTANCE]?.options,
+    ).toBeUndefined();
+    const persisted = partializeComposerDraftStoreState(useComposerDraftStore.getState());
+    expect(
+      persisted.draftsByThreadKey[scopedThreadKey(threadRef)]?.modelSelectionByProvider?.[
+        instanceId
+      ]?.options,
+    ).toEqual([
+      { id: "kiroAgent", value: "reviewer" },
+      { id: "kiroAgentSource", value: "project" },
+    ]);
+  });
 });
 
 describe("composerDraftStore sticky composer settings", () => {
   beforeEach(() => {
     resetComposerDraftStore();
+  });
+
+  it("does not inherit a Kiro thread's agent in a new project's draft", () => {
+    const store = useComposerDraftStore.getState();
+    const instanceId = ProviderInstanceId.make("kiro");
+    store.setStickyModelSelection({
+      instanceId,
+      model: "auto",
+      options: [
+        { id: "kiroAgent", value: "project-reviewer" },
+        { id: "kiroAgentSource", value: "project" },
+      ],
+    });
+    const threadId = ThreadId.make("another-project");
+    store.applyStickyState(scopeThreadRef(TEST_ENVIRONMENT_ID, threadId));
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[instanceId]).toEqual({
+      instanceId,
+      model: "auto",
+    });
+    expect(
+      useComposerDraftStore.getState().stickyModelSelectionByProvider[instanceId]?.options,
+    ).toBeUndefined();
   });
 
   it("stores a sticky model selection", () => {

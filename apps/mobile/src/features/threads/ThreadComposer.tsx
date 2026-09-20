@@ -4,6 +4,10 @@ import { useAtomValue } from "@effect/atom-react";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
 import { pastedTextDisposition, replaceTextSelection } from "@t3tools/client-runtime/text-paste";
 import {
+  getKiroAgentSelection,
+  getKiroAgentSource,
+  KIRO_DEFAULT_AGENT,
+  withKiroAgentSelection,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type EnvironmentId,
@@ -75,6 +79,8 @@ import {
   ComposerToolbarRow,
 } from "../../components/ComposerToolbar";
 import { ProviderIcon } from "../../components/ProviderIcon";
+import { KiroAgentPicker } from "./KiroAgentPicker";
+import { useKiroAgents } from "./use-kiro-agents";
 import {
   composerStripAttachments,
   type DraftComposerAttachment,
@@ -326,6 +332,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     props.connectionState !== "connected" || props.queueCount > 0 || attachmentsUploading
       ? "Queue"
       : "Send";
+  const { onUpdateModelSelection, onUpdateRuntimeMode } = props;
   const currentModelSelection = props.selectedThread.modelSelection;
   const currentRuntimeMode = props.selectedThread.runtimeMode;
   const modelUnavailable =
@@ -339,6 +346,56 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       ) ?? null
     );
   }, [props.serverConfig, props.selectedThread.modelSelection.instanceId]);
+  const isKiro = selectedProviderStatus?.driver === "kiro";
+  const kiroAgentLocked =
+    props.selectedThread.latestUserMessageAt !== null ||
+    props.selectedThread.latestTurn !== null ||
+    props.selectedThread.session !== null;
+  const selectedKiroAgent = getKiroAgentSelection(currentModelSelection.options);
+  const selectedKiroSource = getKiroAgentSource(currentModelSelection.options);
+  const kiroAgents = useKiroAgents({
+    environmentId: props.environmentId,
+    instanceId: currentModelSelection.instanceId,
+    cwd: props.selectedThread.worktreePath ?? props.projectCwd,
+    enabled: isKiro && !kiroAgentLocked && props.connectionState === "connected",
+  });
+  useEffect(() => {
+    if (
+      !isKiro ||
+      kiroAgentLocked ||
+      getKiroAgentSource(currentModelSelection.options) ||
+      !kiroAgents.catalog
+    )
+      return;
+    const agentName = selectedKiroAgent ?? kiroAgents.catalog.defaultAgent ?? KIRO_DEFAULT_AGENT;
+    const source = kiroAgents.catalog.agents.find((agent) => agent.name === agentName)?.source;
+    if (!source) return;
+    onUpdateModelSelection({
+      ...currentModelSelection,
+      options: withKiroAgentSelection(currentModelSelection.options, agentName, source),
+    });
+  }, [
+    isKiro,
+    kiroAgentLocked,
+    selectedKiroAgent,
+    kiroAgents.catalog,
+    currentModelSelection,
+    onUpdateModelSelection,
+  ]);
+  const kiroAgentBlockReason =
+    isKiro &&
+    !kiroAgentLocked &&
+    (selectedKiroAgent === undefined ||
+      (props.connectionState === "connected" &&
+        (kiroAgents.loading ||
+          kiroAgents.error !== null ||
+          !kiroAgents.catalog?.agents.some(
+            (agent) =>
+              agent.name === selectedKiroAgent &&
+              (!selectedKiroSource || agent.source === selectedKiroSource),
+          ))))
+      ? "Choose an available Kiro agent"
+      : null;
   const composerOwnerKey = scopedThreadKey(props.environmentId, props.selectedThread.id);
   const openDraftDocument = (attachment: ComposerDocumentAttachment) => {
     Keyboard.dismiss();
@@ -425,6 +482,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const contextImports = useAtomValue(composerContextImportsAtom);
   const sendBlockedReason =
     props.sendBlockedReason ??
+    kiroAgentBlockReason ??
     (pendingPastedTextAttachmentCount > 0 ? "Attaching pasted text" : null) ??
     attachmentBlockReason;
   const canSend =
@@ -482,7 +540,12 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     onEditorFocusChange?.(false);
   }, [onEditorFocusChange, onExpandedChange, settingsSheetPresentation.keepsComposerExpanded]);
   const handleSend = useCallback(async () => {
-    if (voiceInput.blocksSubmission || pendingPastedTextAttachmentCountRef.current > 0) return;
+    if (
+      voiceInput.blocksSubmission ||
+      pendingPastedTextAttachmentCountRef.current > 0 ||
+      kiroAgentBlockReason !== null
+    )
+      return;
     // Typed out in full rather than picked from the menu. Attachments mean the
     // user is sending a prompt, so those go through as usual.
     if (
@@ -525,6 +588,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     props.selectedThread.id,
     props.selectedThread.title,
     voiceInput.blocksSubmission,
+    kiroAgentBlockReason,
   ]);
 
   // ── Model menu ───────────────────────────────────────────
@@ -561,18 +625,42 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       providerInstanceId: currentModelSelection.instanceId,
       providerGroups: threadProviderGroups,
       selectedModel: currentModelSelection,
-      onSelectModel: (option) => props.onUpdateModelSelection(option.selection),
+      onSelectModel: (option) =>
+        onUpdateModelSelection(
+          isKiro
+            ? {
+                ...option.selection,
+                options: withKiroAgentSelection(
+                  option.selection.options,
+                  selectedKiroAgent,
+                  getKiroAgentSource(currentModelSelection.options),
+                ),
+              }
+            : option.selection,
+        ),
       optionDescriptors: providerOptionDescriptors,
       onUpdateOptionSelections: (options) =>
-        props.onUpdateModelSelection({ ...currentModelSelection, options }),
+        onUpdateModelSelection({
+          ...currentModelSelection,
+          options: isKiro
+            ? withKiroAgentSelection(
+                options,
+                selectedKiroAgent,
+                getKiroAgentSource(currentModelSelection.options),
+              )
+            : options,
+        }),
       runtimeMode: currentRuntimeMode,
-      onUpdateRuntimeMode: props.onUpdateRuntimeMode,
+      onUpdateRuntimeMode: onUpdateRuntimeMode,
     }),
     [
       currentModelSelection,
+      props.environmentId,
+      isKiro,
+      selectedKiroAgent,
       currentRuntimeMode,
-      props.onUpdateModelSelection,
-      props.onUpdateRuntimeMode,
+      onUpdateModelSelection,
+      onUpdateRuntimeMode,
       providerOptionDescriptors,
       settingsOwnerId,
       threadProviderGroups,
@@ -960,6 +1048,30 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                         onPress={openSettings}
                       />
                     </View>
+                    {isKiro ? (
+                      <KiroAgentPicker
+                        selectedAgent={selectedKiroAgent}
+                        selectedSource={selectedKiroSource}
+                        catalog={kiroAgents.catalog}
+                        loading={kiroAgents.loading}
+                        error={kiroAgents.error}
+                        locked={kiroAgentLocked}
+                        onSelect={(agent) =>
+                          onUpdateModelSelection({
+                            ...currentModelSelection,
+                            options: withKiroAgentSelection(
+                              currentModelSelection.options,
+                              agent,
+                              kiroAgents.catalog?.agents.find((entry) => entry.name === agent)
+                                ?.source,
+                            ),
+                          })
+                        }
+                        onRefresh={() => {
+                          void kiroAgents.refresh();
+                        }}
+                      />
+                    ) : null}
                   </View>
                 )}
                 <View className="shrink-0 flex-row items-center">

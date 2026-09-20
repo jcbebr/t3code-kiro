@@ -5,6 +5,9 @@ import {
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
   EnvironmentId,
+  KIRO_AGENT_OPTION_ID,
+  KIRO_AGENT_SOURCE_OPTION_ID,
+  withKiroAgentSelection,
   ModelSelection,
   ProjectId,
   ProviderInstanceId,
@@ -736,14 +739,32 @@ function cloneModelSelection(selection: ModelSelection): DeepMutable<ModelSelect
 
 function compactModelSelectionByProvider(
   selections: Partial<Record<ProviderInstanceId, ModelSelection>>,
+  options?: { sticky?: boolean },
 ): DeepMutable<Record<ProviderInstanceId, ModelSelection>> {
   const entries: Array<[string, DeepMutable<ModelSelection>]> = [];
   for (const [provider, selection] of Object.entries(selections)) {
     if (selection !== undefined) {
-      entries.push([provider, cloneModelSelection(selection)]);
+      entries.push([
+        provider,
+        cloneModelSelection(options?.sticky ? withoutThreadAgentSelection(selection) : selection),
+      ]);
     }
   }
   return Object.fromEntries(entries) as DeepMutable<Record<ProviderInstanceId, ModelSelection>>;
+}
+
+function withoutThreadAgentSelection(selection: ModelSelection): ModelSelection {
+  if (
+    !selection.options?.some(
+      (option) => option.id === KIRO_AGENT_OPTION_ID || option.id === KIRO_AGENT_SOURCE_OPTION_ID,
+    )
+  )
+    return selection;
+  return createModelSelection(
+    selection.instanceId,
+    selection.model,
+    withKiroAgentSelection(selection.options, undefined),
+  );
 }
 
 const EMPTY_PERSISTED_DRAFT_STORE_STATE = Object.freeze<PersistedComposerDraftStoreState>({
@@ -2213,6 +2234,7 @@ export function partializeComposerDraftStoreState(
       state.logicalProjectDraftThreadKeyByLogicalProjectKey,
     stickyModelSelectionByProvider: compactModelSelectionByProvider(
       state.stickyModelSelectionByProvider,
+      { sticky: true },
     ),
     stickyActiveProvider: state.stickyActiveProvider,
   };
@@ -2283,7 +2305,12 @@ function normalizeCurrentPersistedComposerDraftStoreState(
     ),
     draftThreadsByThreadKey,
     logicalProjectDraftThreadKeyByLogicalProjectKey,
-    stickyModelSelectionByProvider: compactModelSelectionByProvider(stickyModelSelectionByProvider),
+    stickyModelSelectionByProvider: compactModelSelectionByProvider(
+      stickyModelSelectionByProvider,
+      {
+        sticky: true,
+      },
+    ),
     stickyActiveProvider,
   };
 }
@@ -2915,10 +2942,11 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             // Model-only picker updates omit options (same contract as
             // setModelSelection). Keep the last sticky traits so Fast/Normal
             // survives Composer 2 → 2.5 and new chats.
-            const nextSelection =
+            const nextSelection = withoutThreadAgentSelection(
               normalized.options !== undefined
                 ? normalized
-                : createModelSelection(normalized.instanceId, normalized.model, current?.options);
+                : createModelSelection(normalized.instanceId, normalized.model, current?.options),
+            );
             const nextMap: Partial<Record<ProviderInstanceId, ModelSelection>> = {
               ...state.stickyModelSelectionByProvider,
               [normalized.instanceId]: nextSelection,
@@ -2944,7 +2972,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const stickyActiveProvider = state.stickyActiveProvider;
             const existing = state.draftsByThreadKey[threadKey];
             const base = existing ?? createEmptyThreadDraft();
-            const nextMap = compactModelSelectionByProvider(stickyMap);
+            const nextMap = compactModelSelectionByProvider(stickyMap, { sticky: true });
             if (
               Equal.equals(base.modelSelectionByProvider, nextMap) &&
               base.activeProvider === stickyActiveProvider &&
@@ -3180,6 +3208,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextStickyActiveProvider = options.instanceId
                 ? instanceKey
                 : (base.activeProvider ?? instanceKey);
+              nextStickyMap = compactModelSelectionByProvider(nextStickyMap, { sticky: true });
             }
 
             if (

@@ -6,6 +6,12 @@ import {
   ThreadLinkedPullRequest,
   UserInputRequestedPayload,
   isImportedAgentSessionMessageId,
+  KIRO_AGENT_OPTION_ID,
+  KIRO_AGENT_SOURCE_OPTION_ID,
+  getKiroAgentSelection,
+  getKiroAgentSource,
+  withKiroAgentSelection,
+  type ModelSelection,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
@@ -52,6 +58,53 @@ const isScriptRunCommand = Schema.is(SCRIPT_RUN_COMMAND_PATTERN);
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const decodeUserInputRequestedPayload = Schema.decodeUnknownOption(UserInputRequestedPayload);
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
+
+const threadModelSelection = Effect.fn("threadModelSelection")(function* (
+  thread: OrchestrationThread,
+  command: Extract<OrchestrationCommand, { type: "thread.meta.update" | "thread.turn.start" }>,
+): Effect.fn.Return<ModelSelection | undefined, OrchestrationCommandInvariantError> {
+  const requested = command.modelSelection;
+  if (!requested) return undefined;
+  const agentOptions = requested.options?.filter((option) => option.id === KIRO_AGENT_OPTION_ID);
+  const requestedAgent = getKiroAgentSelection(requested.options);
+  const sourceOptions = requested.options?.filter(
+    (option) => option.id === KIRO_AGENT_SOURCE_OPTION_ID,
+  );
+  const requestedSource = getKiroAgentSource(requested.options);
+  if (
+    (agentOptions?.length && (agentOptions.length !== 1 || !requestedAgent)) ||
+    (sourceOptions?.length && (sourceOptions.length !== 1 || !requestedSource || !requestedAgent))
+  ) {
+    return yield* new OrchestrationCommandInvariantError({
+      commandType: command.type,
+      detail: "Select a single Kiro agent by name.",
+    });
+  }
+  const currentAgent = getKiroAgentSelection(thread.modelSelection.options);
+  const currentSource = getKiroAgentSource(thread.modelSelection.options);
+  const started =
+    thread.session !== null ||
+    thread.latestTurn !== null ||
+    thread.messages.some((message) => message.role === "user");
+  if (
+    started &&
+    ((requestedAgent !== undefined && requestedAgent !== currentAgent) ||
+      (requestedSource !== undefined && requestedSource !== currentSource))
+  ) {
+    return yield* new OrchestrationCommandInvariantError({
+      commandType: command.type,
+      detail: "The Kiro agent cannot change after the thread starts. Start a new thread instead.",
+    });
+  }
+  // Official clients do not know this option and can omit it when changing a
+  // model or sending a turn. Omission must never erase an existing agent choice.
+  return started && currentAgent
+    ? {
+        ...requested,
+        options: withKiroAgentSelection(requested.options, currentAgent, currentSource),
+      }
+    : requested;
+});
 
 /**
  * Blocked-on-you work derived from the thread's retained activities: an
@@ -891,6 +944,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const modelSelection = yield* threadModelSelection(thread, command);
       // Old clients only see the derived single link. Unlink that request through
       // the same command path as modern clients, including stack dismissal, while
       // retaining other links they cannot see. Historical metadata events still replay unchanged.
@@ -1010,9 +1064,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.title !== undefined && thread.titleRegeneration != null
             ? { titleRegeneration: null }
             : {}),
-          ...(command.modelSelection !== undefined
-            ? { modelSelection: command.modelSelection }
-            : {}),
+          ...(modelSelection !== undefined ? { modelSelection } : {}),
           ...(branch !== undefined ? { branch } : {}),
           ...(command.worktreePath !== undefined ? { worktreePath: command.worktreePath } : {}),
           ...(command.linkedPullRequest !== undefined
@@ -1366,6 +1418,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const modelSelection = yield* threadModelSelection(targetThread, command);
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -1435,9 +1488,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.message.messageId,
-          ...(command.modelSelection !== undefined
-            ? { modelSelection: command.modelSelection }
-            : {}),
+          ...(modelSelection !== undefined ? { modelSelection } : {}),
           ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
@@ -1483,8 +1534,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         });
       }
+      const agentSelectedEvent: Omit<OrchestrationEvent, "sequence"> | null =
+        modelSelection !== undefined &&
+        (getKiroAgentSelection(modelSelection.options) !==
+          getKiroAgentSelection(targetThread.modelSelection.options) ||
+          getKiroAgentSource(modelSelection.options) !==
+            getKiroAgentSource(targetThread.modelSelection.options))
+          ? {
+              ...(yield* withEventBase({
+                aggregateKind: "thread",
+                aggregateId: command.threadId,
+                occurredAt: command.createdAt,
+                commandId: command.commandId,
+              })),
+              type: "thread.meta-updated",
+              payload: { threadId: command.threadId, modelSelection, updatedAt: command.createdAt },
+            }
+          : null;
       return [
         ...lifecycleResetEvents,
+        ...(agentSelectedEvent ? [agentSelectedEvent] : []),
         ...(userMessageEvent ? [userMessageEvent] : []),
         turnStartRequestedEvent,
       ];

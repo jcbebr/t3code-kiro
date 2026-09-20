@@ -3,6 +3,11 @@ import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
+  KiroAgentCatalog,
+  KiroAgentCatalogError,
+  KiroAgentCatalogInput,
+} from "./kiroAgentCatalog.ts";
+import {
   ProviderAuthCancelInput,
   ProviderAuthCompleteInput,
   ProviderAuthState,
@@ -358,6 +363,7 @@ export const WS_METHODS = {
   serverProbe: "server.probe",
   serverGetConfig: "server.getConfig",
   serverRefreshProviders: "server.refreshProviders",
+  serverGetKiroAgents: "server.getKiroAgents",
   serverUpdateProvider: "server.updateProvider",
   serverUpdateServer: "server.updateServer",
   serverUpdateServerWithProgress: "server.updateServerWithProgress",
@@ -475,6 +481,12 @@ const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, 
   }),
   success: ServerProviderUpdatedPayload,
   error: Schema.Union([EnvironmentAuthorizationError, ProviderSetupError]),
+});
+
+const WsServerGetKiroAgentsRpc = Rpc.make(WS_METHODS.serverGetKiroAgents, {
+  payload: KiroAgentCatalogInput,
+  success: KiroAgentCatalog,
+  error: Schema.Union([EnvironmentAuthorizationError, KiroAgentCatalogError]),
 });
 
 const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvider, {
@@ -1361,6 +1373,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
+  WsServerGetKiroAgentsRpc,
   WsServerUpdateProviderRpc,
   WsProviderConsumeResetCreditRpc,
   WsProviderAuthStartRpc,

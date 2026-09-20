@@ -3,6 +3,10 @@ import {
   EventId,
   RuntimeRequestId,
   TurnId,
+  KIRO_DEFAULT_AGENT,
+  getKiroAgentSelection,
+  getKiroAgentSource,
+  type KiroAgentSource,
   type KiroSettings,
   type ProviderApprovalDecision,
   type ProviderInstanceId,
@@ -72,14 +76,18 @@ export interface KiroAdapterOptions {
   readonly instanceId: ProviderInstanceId;
   readonly makeRuntime: (input: {
     readonly cwd: string;
+    readonly agent?: string;
+    readonly agentSource?: KiroAgentSource;
     readonly resumeSessionId?: string;
-  }) => Effect.Effect<Runtime, AcpErrors.AcpError, Scope.Scope>;
+  }) => Effect.Effect<Runtime, AcpErrors.AcpError | ProviderAdapterValidationError, Scope.Scope>;
   readonly onSessionStarted?: (started: AcpSessionRuntimeStartResult) => Effect.Effect<void>;
 }
 
 const ResumeCursor = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   sessionId: Schema.NonEmptyString,
+  agent: Schema.optional(Schema.NonEmptyString),
+  agentSource: Schema.optional(Schema.Literals(["project", "global", "builtin"])),
 });
 const decodeCursor = Schema.decodeUnknownOption(ResumeCursor);
 const isAcpError = Schema.is(AcpErrors.AcpError);
@@ -93,6 +101,8 @@ interface PendingApproval {
 interface SessionContext {
   readonly runtime: Runtime;
   readonly nativeSessionId: string;
+  readonly agent: string;
+  readonly agentSource?: KiroAgentSource;
   readonly scope: Scope.Closeable;
   readonly promptLock: Semaphore.Semaphore;
   readonly stopLock: Semaphore.Semaphore;
@@ -330,7 +340,24 @@ export const makeKiroAdapter = Effect.fn("makeKiroAdapter")(function* (
             "The saved Kiro session is invalid. Start a new thread.",
           );
         }
+        const requestedAgent = getKiroAgentSelection(input.modelSelection?.options);
+        const requestedAgentSource = getKiroAgentSource(input.modelSelection?.options);
         const previous = sessions.get(input.threadId);
+        const pinnedAgent =
+          (Option.isSome(cursor) ? cursor.value.agent : undefined) ?? previous?.agent;
+        const pinnedAgentSource =
+          (Option.isSome(cursor) ? cursor.value.agentSource : undefined) ?? previous?.agentSource;
+        if (
+          (requestedAgent && pinnedAgent && requestedAgent !== pinnedAgent) ||
+          (requestedAgentSource && pinnedAgentSource && requestedAgentSource !== pinnedAgentSource)
+        ) {
+          return yield* invalid(
+            "startSession",
+            "The Kiro agent cannot change after the thread starts. Start a new thread instead.",
+          );
+        }
+        const agent = pinnedAgent ?? requestedAgent ?? (settings.agent.trim() || undefined);
+        const agentSource = pinnedAgentSource ?? requestedAgentSource;
         if (previous) yield* stopContext(previous);
         const scope = yield* Scope.make("sequential");
         let transferred = false;
@@ -346,6 +373,8 @@ export const makeKiroAdapter = Effect.fn("makeKiroAdapter")(function* (
         const session = yield* Effect.gen(function* () {
           const runtime = yield* options.makeRuntime({
             cwd: input.cwd!,
+            ...(agent ? { agent } : {}),
+            ...(agentSource ? { agentSource } : {}),
             ...(Option.isSome(cursor) ? { resumeSessionId: cursor.value.sessionId } : {}),
           });
           yield* runtime.handleRequestPermission((request) =>
@@ -364,6 +393,16 @@ export const makeKiroAdapter = Effect.fn("makeKiroAdapter")(function* (
                 } satisfies AcpSchema.RequestPermissionResponse),
           );
           const started = yield* runtime.start();
+          const reportedAgent = started.sessionSetupResult.modes?.currentModeId;
+          if (agent && reportedAgent && agent !== reportedAgent) {
+            return yield* invalid(
+              "startSession",
+              `Kiro started agent '${reportedAgent}' instead of '${agent}'. Check that the selected agent is available in this workspace on the server.`,
+            );
+          }
+          // Omitting --agent lets the CLI resolve its configured default. Persist that
+          // result so changing environment defaults cannot change a resumed thread.
+          const sessionAgent = agent ?? reportedAgent ?? KIRO_DEFAULT_AGENT;
           yield* selectModel(runtime, input.modelSelection?.model);
           yield* options.onSessionStarted?.(started) ?? Effect.void;
           const createdAt = yield* now;
@@ -375,13 +414,20 @@ export const makeKiroAdapter = Effect.fn("makeKiroAdapter")(function* (
             status: "ready",
             runtimeMode: input.runtimeMode,
             model: input.modelSelection?.model ?? KIRO_DEFAULT_MODEL,
-            resumeCursor: { schemaVersion: 1, sessionId: started.sessionId },
+            resumeCursor: {
+              schemaVersion: 1,
+              sessionId: started.sessionId,
+              agent: sessionAgent,
+              ...(agentSource ? { agentSource } : {}),
+            },
             createdAt,
             updatedAt: createdAt,
           };
           context = {
             runtime,
             nativeSessionId: started.sessionId,
+            agent: sessionAgent,
+            ...(agentSource ? { agentSource } : {}),
             scope,
             promptLock: yield* Semaphore.make(1),
             stopLock: yield* Semaphore.make(1),
@@ -458,6 +504,17 @@ export const makeKiroAdapter = Effect.fn("makeKiroAdapter")(function* (
     const context = yield* requireSession(input.threadId);
     if (input.modelSelection && input.modelSelection.instanceId !== options.instanceId) {
       return yield* invalid("sendTurn", "The selected model belongs to another provider instance.");
+    }
+    const requestedAgent = getKiroAgentSelection(input.modelSelection?.options);
+    const requestedAgentSource = getKiroAgentSource(input.modelSelection?.options);
+    if (
+      (requestedAgent && requestedAgent !== context.agent) ||
+      (requestedAgentSource && requestedAgentSource !== context.agentSource)
+    ) {
+      return yield* invalid(
+        "sendTurn",
+        "The Kiro agent cannot change after the thread starts. Start a new thread instead.",
+      );
     }
     if (!input.input?.trim()) return yield* invalid("sendTurn", "Enter a message for Kiro.");
     if (input.attachments?.length)
