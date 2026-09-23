@@ -9,7 +9,7 @@ const CREDITS = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 });
 
 export function KiroUsageSection({ usage }: { readonly usage: NonNullable<MergedUsage["kiro"]> }) {
   return (
-    <SettingsSection title="Kiro credits" card>
+    <SettingsSection title="Kiro credits">
       <View className="gap-3 p-4">
         <Text className="text-3xl font-t3-bold tabular-nums text-foreground">
           {usage.unavailable ? "Unavailable" : `${CREDITS.format(usage.credits)} credits`}

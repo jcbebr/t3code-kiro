@@ -27,7 +27,7 @@ export function KiroAgentPicker(props: {
     return (
       <ComposerInlineControl
         label={label}
-        icon="lock.fill"
+        icon={{ ios: "lock.fill", android: "lock" }}
         accessibilityLabel={`Kiro agent: ${label}`}
         accessibilityHint="The agent is fixed after the thread starts."
         static

@@ -1,13 +1,14 @@
 import * as NodeOS from "node:os";
 
 import type { ServerProviderSkill } from "@t3tools/contracts";
+import * as ByteSize from "effect/ByteSize";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import { parse as parseYamlDocument } from "yaml";
 
 const FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
-const MAX_SKILL_BYTES = FileSystem.Size(1_000_000);
+const MAX_SKILL_BYTES = ByteSize.bytes(1_000_000);
 const SKILL_MENTION_PATTERN =
   /(^|\s)\$(?![0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$))(?=[a-zA-Z0-9:_-]*[a-zA-Z])([a-zA-Z0-9][a-zA-Z0-9:_-]*)(?=\s|$)/g;
 
