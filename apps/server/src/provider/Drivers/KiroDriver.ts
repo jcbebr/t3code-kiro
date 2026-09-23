@@ -16,6 +16,7 @@ import { defaultProviderContinuationIdentity, type ProviderDriver } from "../Pro
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { requireKiroAgentSource } from "../kiroAgentCatalog.ts";
 import { withInstanceIdentity } from "./instanceIdentity.ts";
+import { discoverKiroSkills } from "./KiroSkills.ts";
 
 const decodeSettings = Schema.decodeSync(KiroSettings);
 export type KiroDriverEnv =
@@ -67,6 +68,12 @@ export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv> = {
       const adapter = yield* makeKiroAdapter(settings, {
         instanceId,
         onSessionStarted: provider.onSessionStarted,
+        resolveSkillNames: (cwd) =>
+          discoverKiroSkills(cwd, processEnvironment).pipe(
+            Effect.map((skills) => new Set(skills.map((skill) => skill.name))),
+            Effect.provideService(FileSystem.FileSystem, fs),
+            Effect.provideService(Path.Path, path),
+          ),
         makeRuntime: ({ agent, agentSource, ...input }) =>
           Effect.gen(function* () {
             if (agent && agentSource) {
@@ -101,6 +108,17 @@ export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv> = {
             Effect.provideService(Path.Path, path),
           ),
       });
+      const snapshotForCwd = (cwd: string) =>
+        !settings.enabled
+          ? provider.snapshot.getSnapshot
+          : Effect.all([
+              provider.snapshot.getSnapshot,
+              discoverKiroSkills(cwd, processEnvironment),
+            ]).pipe(
+              Effect.map(([snapshot, skills]) => ({ ...snapshot, skills })),
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provideService(Path.Path, path),
+            );
       return {
         instanceId,
         driverKind: KIRO_DRIVER,
@@ -109,6 +127,7 @@ export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv> = {
         accentColor,
         enabled,
         snapshot: provider.snapshot,
+        snapshotForCwd,
         adapter,
         textGeneration: kiroTextGeneration,
       };

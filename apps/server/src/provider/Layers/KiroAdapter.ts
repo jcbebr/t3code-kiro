@@ -60,6 +60,7 @@ import {
   kiroPermissionOption,
 } from "../acp/KiroAcpSupport.ts";
 import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
+import { rewriteKiroSkillMentions } from "../Drivers/KiroSkills.ts";
 
 type Adapter = ProviderAdapterShape<ProviderAdapterError>;
 type Runtime = Pick<
@@ -74,6 +75,7 @@ type Runtime = Pick<
 >;
 export interface KiroAdapterOptions {
   readonly instanceId: ProviderInstanceId;
+  readonly resolveSkillNames?: (cwd: string) => Effect.Effect<ReadonlySet<string>>;
   readonly makeRuntime: (input: {
     readonly cwd: string;
     readonly agent?: string;
@@ -581,11 +583,16 @@ export const makeKiroAdapter = Effect.fn("makeKiroAdapter")(function* (
               payload: model ? { model } : {},
             });
           const dispatched = yield* Deferred.make<void>();
+          const prompt = input.input!;
+          const skillNames =
+            prompt.includes("$") && options.resolveSkillNames && context.session.cwd
+              ? yield* options.resolveSkillNames(context.session.cwd)
+              : new Set<string>();
           const fiber = yield* context.runtime
             .prompt(
               {
                 prompt: [
-                  { type: "text", text: input.input! },
+                  { type: "text", text: rewriteKiroSkillMentions(prompt, skillNames) },
                   { type: "text", text: buildRuntimeInstructions({ harness: "Kiro" }) },
                 ],
               },

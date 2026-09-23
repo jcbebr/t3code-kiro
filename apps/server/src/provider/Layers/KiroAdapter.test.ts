@@ -35,6 +35,7 @@ const makeHarness = Effect.fn("KiroTest.makeHarness")(function* (
   environment: NodeJS.ProcessEnv = {},
   providerSettings = settings,
   reportedAgent?: string,
+  skillNames?: ReadonlySet<string>,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const crypto = yield* Crypto.Crypto;
@@ -48,6 +49,7 @@ const makeHarness = Effect.fn("KiroTest.makeHarness")(function* (
   const runtimeInputs: Parameters<KiroAdapterOptions["makeRuntime"]>[0][] = [];
   const adapter = yield* makeKiroAdapter(providerSettings, {
     instanceId,
+    ...(skillNames ? { resolveSkillNames: () => Effect.succeed(skillNames) } : {}),
     makeRuntime: (input) =>
       Effect.gen(function* () {
         runtimeInputs.push(input);
@@ -140,6 +142,22 @@ const makeHarness = Effect.fn("KiroTest.makeHarness")(function* (
     });
   return { adapter, start, waitFor, seen, requests, responses, runtimes, runtimeInputs, cwd };
 });
+
+it.effect("sends selected skills as native Kiro slash commands", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness({}, settings, undefined, new Set(["review"]));
+    yield* h.start();
+    yield* h.adapter.sendTurn({
+      threadId,
+      input: "$review check this change",
+      modelSelection: { instanceId, model: KIRO_DEFAULT_MODEL },
+    });
+    expect((yield* h.waitFor("turn.completed")).payload.state).toBe("completed");
+    expect(h.requests.find((event) => event.method === "session/prompt")?.payload).toMatchObject({
+      prompt: expect.arrayContaining([{ type: "text", text: "/review check this change" }]),
+    });
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
 
 it.effect("runs independent thread agents and retains the selected agent when resuming", () =>
   Effect.gen(function* () {
