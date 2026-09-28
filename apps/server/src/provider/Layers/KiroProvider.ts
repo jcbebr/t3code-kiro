@@ -13,6 +13,7 @@ import {
   KIRO_DEFAULT_MODELS,
   KIRO_DRIVER,
   KIRO_LOGIN_MESSAGE,
+  kiroCliModels,
   kiroModels,
 } from "../acp/KiroAcpSupport.ts";
 import type { AcpSessionRuntimeStartResult } from "../acp/AcpSessionRuntime.ts";
@@ -106,8 +107,16 @@ export const makeKiroProvider = Effect.fn("makeKiroProvider")(function* (
         auth: { status: "unauthenticated" as const },
         message: KIRO_LOGIN_MESSAGE,
       };
+    const catalogOutput = yield* run(["chat", "--list-models", "--format", "json"]).pipe(
+      Effect.option,
+    );
+    if (catalogOutput._tag === "Some" && catalogOutput.value.code === 0) {
+      const catalog = kiroCliModels(catalogOutput.value.stdout);
+      if (catalog) yield* SubscriptionRef.set(models, catalog);
+    }
     return {
       ...checked,
+      models: yield* SubscriptionRef.get(models),
       status: "ready" as const,
       auth: { status: "authenticated" as const, type: "cli", label: "Kiro CLI login" },
       message:

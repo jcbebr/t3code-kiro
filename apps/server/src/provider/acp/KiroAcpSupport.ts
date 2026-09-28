@@ -6,6 +6,8 @@ import {
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import type * as AcpSchema from "effect-acp/schema";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 
 export const KIRO_DRIVER = ProviderDriverKind.make("kiro");
@@ -20,6 +22,41 @@ export const KIRO_DEFAULT_MODELS: ReadonlyArray<ServerProviderModel> = [
     capabilities: {},
   },
 ];
+
+const KiroCliModelCatalog = Schema.fromJsonString(
+  Schema.Struct({
+    models: Schema.Array(
+      Schema.Struct({
+        model_id: Schema.NonEmptyString,
+        name: Schema.optional(Schema.String),
+        display_name: Schema.optional(Schema.String),
+        model_name: Schema.optional(Schema.String),
+      }),
+    ),
+  }),
+);
+const decodeKiroCliModelCatalog = Schema.decodeUnknownOption(KiroCliModelCatalog);
+
+export function kiroCliModels(output: string): ReadonlyArray<ServerProviderModel> | undefined {
+  const catalog = decodeKiroCliModelCatalog(output);
+  if (Option.isNone(catalog)) return undefined;
+  const seen = new Set([KIRO_DEFAULT_MODEL]);
+  return [
+    ...KIRO_DEFAULT_MODELS,
+    ...catalog.value.models.flatMap((model) => {
+      if (seen.has(model.model_id)) return [];
+      seen.add(model.model_id);
+      return [
+        {
+          slug: model.model_id,
+          name: model.name || model.display_name || model.model_name || model.model_id,
+          isCustom: false,
+          capabilities: {},
+        },
+      ];
+    }),
+  ];
+}
 
 export function kiroSpawnInput(settings: KiroSettings, cwd: string, env: NodeJS.ProcessEnv) {
   return {

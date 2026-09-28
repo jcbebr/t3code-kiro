@@ -35,6 +35,13 @@ const fixture = Effect.fn("KiroProviderTest.fixture")(function* (
       console.log(JSON.stringify({ account: process.env.KIRO_TEST_MODE === "logged-in" ? "test-account" : null }));
       process.exit(process.env.KIRO_TEST_MODE === "logged-in" ? 0 : 1);
     }
+    if (args.join(" ") === "chat --list-models --format json") {
+      console.log(JSON.stringify({ models: [
+        { model_id: "auto", name: "Auto" },
+        { model_id: "claude-opus-5.5", model_name: "Claude Opus 5.5" },
+      ], default_model: "auto" }));
+      process.exit(0);
+    }
     process.exit(99);
   `,
   });
@@ -53,7 +60,7 @@ const fixture = Effect.fn("KiroProviderTest.fixture")(function* (
 });
 
 it.effect(
-  "checks the existing login without opening ACP sessions or leaking account metadata",
+  "discovers available models through the authenticated CLI without opening ACP sessions",
   () =>
     Effect.gen(function* () {
       const { snapshot, calls } = yield* fixture("logged-in");
@@ -64,9 +71,17 @@ it.effect(
         label: "Kiro CLI login",
       });
       expect(snapshot.models[0]?.slug).toBe("kiro-default");
-      expect(calls.every((call) => ["--version", "whoami --format json"].includes(call))).toBe(
-        true,
-      );
+      expect(snapshot.models.map((model) => model.slug)).toEqual([
+        "kiro-default",
+        "auto",
+        "claude-opus-5.5",
+      ]);
+      expect(snapshot.models[2]?.name).toBe("Claude Opus 5.5");
+      expect(
+        calls.every((call) =>
+          ["--version", "whoami --format json", "chat --list-models --format json"].includes(call),
+        ),
+      ).toBe(true);
       expect(calls).toContain("whoami --format json");
     }).pipe(Effect.scoped, Effect.provide(services)),
 );
