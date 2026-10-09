@@ -30,6 +30,7 @@ import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import * as AcpErrors from "effect-acp/errors";
 import type * as AcpSchema from "effect-acp/schema";
+import { readMcpProviderSession } from "../../mcp/McpProviderSession.ts";
 import {
   ProviderAdapterRequestError,
   ProviderAdapterSessionClosedError,
@@ -81,6 +82,7 @@ export interface KiroAdapterOptions {
     readonly agent?: string;
     readonly agentSource?: KiroAgentSource;
     readonly resumeSessionId?: string;
+    readonly mcpServers: ReadonlyArray<AcpSchema.McpServer>;
   }) => Effect.Effect<Runtime, AcpErrors.AcpError | ProviderAdapterValidationError, Scope.Scope>;
   readonly onSessionStarted?: (started: AcpSessionRuntimeStartResult) => Effect.Effect<void>;
 }
@@ -373,11 +375,22 @@ export const makeKiroAdapter = Effect.fn("makeKiroAdapter")(function* (
               }),
         );
         const session = yield* Effect.gen(function* () {
+          const mcp = readMcpProviderSession(input.threadId);
           const runtime = yield* options.makeRuntime({
             cwd: input.cwd!,
             ...(agent ? { agent } : {}),
             ...(agentSource ? { agentSource } : {}),
             ...(Option.isSome(cursor) ? { resumeSessionId: cursor.value.sessionId } : {}),
+            mcpServers: mcp
+              ? [
+                  {
+                    type: "http",
+                    name: "t3-code",
+                    url: mcp.endpoint,
+                    headers: [{ name: "Authorization", value: mcp.authorizationHeader }],
+                  },
+                ]
+              : [],
           });
           yield* runtime.handleRequestPermission((request) =>
             context

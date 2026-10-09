@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   ApprovalRequestId,
+  EnvironmentId,
   KiroSettings,
   KIRO_DEFAULT_AGENT,
   ProviderInstanceId,
@@ -20,6 +21,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import type * as AcpSchema from "effect-acp/schema";
+import { clearMcpProviderSession, setMcpProviderSession } from "../../mcp/McpProviderSession.ts";
 import * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import { KIRO_DEFAULT_MODEL } from "../acp/KiroAcpSupport.ts";
 import { makeKiroAdapter, type KiroAdapterOptions } from "./KiroAdapter.ts";
@@ -157,6 +159,59 @@ it.effect("sends selected skills as native Kiro slash commands", () =>
       prompt: expect.arrayContaining([{ type: "text", text: "/review check this change" }]),
     });
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "passes thread MCP credentials to new and resumed sessions without leaking to other threads",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      yield* Effect.addFinalizer(() => Effect.sync(() => clearMcpProviderSession(threadId)));
+      const register = (authorizationHeader: string) =>
+        setMcpProviderSession({
+          environmentId: EnvironmentId.make("kiro-environment"),
+          threadId,
+          providerSessionId: "kiro-session",
+          providerInstanceId: instanceId,
+          endpoint: "http://127.0.0.1:3773/api/mcp",
+          authorizationHeader,
+          capabilities: new Set(["pull-requests"]),
+        });
+      register("Bearer initial-test-token");
+      const session = yield* h.start();
+      yield* h.start("approval-required", undefined, ThreadId.make("kiro-no-mcp-thread"));
+      yield* h.adapter.stopSession(threadId);
+      register("Bearer resumed-test-token");
+      yield* h.start("approval-required", session.resumeCursor);
+      const setupRequests = h.requests.filter(
+        (event) =>
+          event.status === "succeeded" &&
+          (event.method === "session/new" || event.method === "session/load"),
+      );
+      expect(setupRequests.map((event) => event.payload)).toEqual([
+        expect.objectContaining({
+          mcpServers: [
+            {
+              type: "http",
+              name: "t3-code",
+              url: "http://127.0.0.1:3773/api/mcp",
+              headers: [{ name: "Authorization", value: "Bearer initial-test-token" }],
+            },
+          ],
+        }),
+        expect.objectContaining({ mcpServers: [] }),
+        expect.objectContaining({
+          mcpServers: [
+            {
+              type: "http",
+              name: "t3-code",
+              url: "http://127.0.0.1:3773/api/mcp",
+              headers: [{ name: "Authorization", value: "Bearer resumed-test-token" }],
+            },
+          ],
+        }),
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect("runs independent thread agents and retains the selected agent when resuming", () =>
