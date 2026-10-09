@@ -1,21 +1,27 @@
-import { KiroSettings } from "@t3tools/contracts";
+import { getKiroAgentSelection, getKiroAgentSource, KiroSettings } from "@t3tools/contracts";
+import { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
+import { IdAllocatorV2 } from "@t3tools/provider-core/server/IdAllocator";
+import { McpProviderSessions } from "@t3tools/provider-core/server/McpProviderSessions";
+import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
+import {
+  defaultProviderContinuationIdentity,
+  type ProviderDriver,
+} from "@t3tools/provider-core/server/driver";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
+import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { ChildProcessSpawner } from "effect/unstable/process";
-import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
-import { ServerSettingsService } from "../../serverSettings.ts";
+import { ChildProcessSpawner } from "effect/process";
+import * as AcpErrors from "effect-acp/errors";
 import { kiroTextGeneration } from "../../textGeneration/KiroTextGeneration.ts";
-import { ProviderAdapterValidationError, ProviderDriverError } from "../Errors.ts";
-import { makeKiroAdapter } from "../Layers/KiroAdapter.ts";
-import { makeKiroProvider } from "../Layers/KiroProvider.ts";
+import { makeKiroAdapter } from "../KiroAdapter.ts";
+import { makeKiroProvider } from "../KiroProvider.ts";
 import { KIRO_DRIVER, makeKiroAcpRuntime } from "../acp/KiroAcpSupport.ts";
-import { defaultProviderContinuationIdentity, type ProviderDriver } from "../ProviderDriver.ts";
-import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { requireKiroAgentSource } from "../kiroAgentCatalog.ts";
-import { withInstanceIdentity } from "./instanceIdentity.ts";
 import { discoverKiroSkills } from "./KiroSkills.ts";
 
 const decodeSettings = Schema.decodeSync(KiroSettings);
@@ -24,8 +30,9 @@ export type KiroDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
   | Path.Path
-  | BackgroundPolicy.BackgroundPolicy
-  | ServerSettingsService;
+  | ProviderHost
+  | IdAllocatorV2
+  | McpProviderSessions;
 
 export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv> = {
   driverKind: KIRO_DRIVER,
@@ -65,43 +72,49 @@ export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv> = {
             }),
         ),
       );
-      const adapter = yield* makeKiroAdapter(settings, {
+      const selfInvocation = yield* resolveSelfInvocation().pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: KIRO_DRIVER,
+              instanceId,
+              detail: "Could not resolve the server executable for Kiro MCP.",
+              cause,
+            }),
+        ),
+      );
+      const discoverSkills = (cwd: string) =>
+        discoverKiroSkills(cwd, processEnvironment).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+        );
+      const orchestrationAdapter = yield* makeKiroAdapter(settings, {
         instanceId,
+        selfInvocation,
         onSessionStarted: provider.onSessionStarted,
         resolveSkillNames: (cwd) =>
-          discoverKiroSkills(cwd, processEnvironment).pipe(
+          discoverSkills(cwd).pipe(
             Effect.map((skills) => new Set(skills.map((skill) => skill.name))),
-            Effect.provideService(FileSystem.FileSystem, fs),
-            Effect.provideService(Path.Path, path),
           ),
-        makeRuntime: ({ agent, agentSource, ...input }) =>
-          Effect.gen(function* () {
-            if (agent && agentSource) {
-              yield* requireKiroAgentSource({
-                cwd: input.cwd,
+        validateAgent: (cwd, selection) => {
+          const agent = getKiroAgentSelection(selection.options);
+          const agentSource = getKiroAgentSource(selection.options);
+          return agent && agentSource
+            ? requireKiroAgentSource({
+                cwd,
                 environment: processEnvironment,
                 agent,
                 agentSource,
               }).pipe(
-                Effect.mapError(
-                  (error) =>
-                    new ProviderAdapterValidationError({
-                      provider: KIRO_DRIVER,
-                      operation: "startSession",
-                      issue: error.message,
-                    }),
-                ),
-              );
-            }
-            return yield* makeKiroAcpRuntime(
-              { ...settings, agent: agent ?? settings.agent },
-              processEnvironment,
-              {
-                ...input,
-                clientInfo: { name: "t3-code", version: "0.0.0" },
-              },
-            );
-          }).pipe(
+                Effect.asVoid,
+                Effect.mapError((cause) => AcpErrors.AcpRequestError.internalError(cause.message)),
+                Effect.provideService(FileSystem.FileSystem, fs),
+                Effect.provideService(Path.Path, path),
+              )
+            : Effect.void;
+        },
+        makeRuntime: ({ agent, ...input }) =>
+          makeKiroAcpRuntime({ ...settings, agent: agent ?? "" }, processEnvironment, input).pipe(
             Effect.provideService(Crypto.Crypto, crypto),
             Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
             Effect.provideService(FileSystem.FileSystem, fs),
@@ -111,13 +124,8 @@ export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv> = {
       const snapshotForCwd = (cwd: string) =>
         !settings.enabled
           ? provider.snapshot.getSnapshot
-          : Effect.all([
-              provider.snapshot.getSnapshot,
-              discoverKiroSkills(cwd, processEnvironment),
-            ]).pipe(
+          : Effect.all([provider.snapshot.getSnapshot, discoverSkills(cwd)]).pipe(
               Effect.map(([snapshot, skills]) => ({ ...snapshot, skills })),
-              Effect.provideService(FileSystem.FileSystem, fs),
-              Effect.provideService(Path.Path, path),
             );
       return {
         instanceId,
@@ -128,7 +136,7 @@ export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv> = {
         enabled,
         snapshot: provider.snapshot,
         snapshotForCwd,
-        adapter,
+        orchestrationAdapter,
         textGeneration: kiroTextGeneration,
       };
     }),

@@ -1,5 +1,4 @@
 import type { EnvironmentId, KiroAgentCatalog, ProviderInstanceId } from "@t3tools/contracts";
-import { AsyncResult } from "effect/unstable/reactivity";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { serverEnvironment } from "../../state/server";
@@ -34,7 +33,7 @@ export function useKiroAgents(input: {
       const result = await query({ environmentId, input: { instanceId, cwd } });
       if (generation.current !== request) return;
       setState(
-        AsyncResult.isSuccess(result)
+        result._tag === "Success"
           ? { key, catalog: result.value, error: null, loading: false }
           : {
               key,

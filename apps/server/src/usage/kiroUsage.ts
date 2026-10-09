@@ -13,7 +13,7 @@ import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import { addTotals, EMPTY_TOTALS, totalTokens } from "./usageTranscripts.ts";
+import { EMPTY_TOTALS, totalTokens } from "./usageTranscripts.ts";
 
 const NonEmptyString = Schema.String.check(Schema.isMinLength(1));
 const NonNegativeNumber = Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0));
@@ -305,7 +305,15 @@ export function makeKiroUsageReader() {
         bucket.sessions.add(record.sessionId);
         sessions.add(record.sessionId);
         if (record.totals !== undefined) {
-          bucket.totals = addTotals(bucket.totals, record.totals);
+          bucket.totals = {
+            uncachedInputTokens:
+              bucket.totals.uncachedInputTokens + record.totals.uncachedInputTokens,
+            cachedInputTokens: bucket.totals.cachedInputTokens + record.totals.cachedInputTokens,
+            cacheCreationTokens:
+              bucket.totals.cacheCreationTokens + record.totals.cacheCreationTokens,
+            outputTokens: bucket.totals.outputTokens + record.totals.outputTokens,
+            reasoningTokens: bucket.totals.reasoningTokens + record.totals.reasoningTokens,
+          };
           bucket.tokenRecords += 1;
         }
       }

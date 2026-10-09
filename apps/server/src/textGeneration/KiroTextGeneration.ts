@@ -2,7 +2,7 @@ import { TextGenerationError } from "@t3tools/contracts";
 import { sanitizeBranchFragment } from "@t3tools/shared/git";
 import * as Effect from "effect/Effect";
 import { TextGeneration } from "./TextGeneration.ts";
-import { sanitizeThreadTitle } from "./TextGenerationUtils.ts";
+import { sanitizeThreadTitle } from "@t3tools/provider-core/server/textGenerationUtils";
 
 // These helpers never start an agent or send company code to another provider.
 export const kiroTextGeneration = TextGeneration.of({

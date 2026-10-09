@@ -47,7 +47,7 @@ export function KiroUsageSection({ usage }: { readonly usage: NonNullable<Merged
         </p>
       ) : null}
       {usage.partial || usage.unavailable ? (
-        <p className="text-xs text-amber-600 dark:text-amber-400">
+        <p className="text-xs text-warning-foreground">
           {usage.unavailable
             ? "Kiro usage could not be read."
             : "Kiro totals are partial because some history could not be read."}

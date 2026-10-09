@@ -1,3 +1,4 @@
+import { createModelCapabilities } from "@t3tools/shared/model";
 import {
   ProviderDriverKind,
   type KiroSettings,
@@ -5,10 +6,10 @@ import {
   type ProviderApprovalOption,
   type ServerProviderModel,
 } from "@t3tools/contracts";
-import type * as AcpSchema from "effect-acp/schema";
+import type * as AcpSchema from "effect-acp/compat";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
+import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 
 export const KIRO_DRIVER = ProviderDriverKind.make("kiro");
 export const KIRO_DEFAULT_MODEL = "kiro-default";
@@ -19,7 +20,7 @@ export const KIRO_DEFAULT_MODELS: ReadonlyArray<ServerProviderModel> = [
     name: "Kiro default",
     isCustom: false,
     isDefault: true,
-    capabilities: {},
+    capabilities: createModelCapabilities({ optionDescriptors: [] }),
   },
 ];
 
@@ -51,7 +52,7 @@ export function kiroCliModels(output: string): ReadonlyArray<ServerProviderModel
           slug: model.model_id,
           name: model.name || model.display_name || model.model_name || model.model_id,
           isCustom: false,
-          capabilities: {},
+          capabilities: createModelCapabilities({ optionDescriptors: [] }),
         },
       ];
     }),
@@ -75,8 +76,7 @@ export const makeKiroAcpRuntime = (
   AcpSessionRuntime.make({
     ...input,
     spawn: kiroSpawnInput(settings, input.cwd, environment),
-    // Kiro owns the Identity Center session and exits before initialize when logged out.
-    authMethodId: null,
+    // Kiro owns the CLI login; no ACP authentication method is configured.
     cancelBehavior: "wait-for-prompt",
   });
 
@@ -90,7 +90,7 @@ export function kiroModels(started: AcpSessionRuntime.AcpSessionRuntimeStartResu
         slug: model.modelId,
         name: model.name,
         isCustom: false,
-        capabilities: {},
+        capabilities: createModelCapabilities({ optionDescriptors: [] }),
       })),
   ];
 }

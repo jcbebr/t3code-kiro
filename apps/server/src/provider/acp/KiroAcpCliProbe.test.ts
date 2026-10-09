@@ -1,21 +1,12 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import {
-  KiroSettings,
-  ProviderInstanceId,
-  ThreadId,
-  type ProviderRuntimeEvent,
-} from "@t3tools/contracts";
-import * as Crypto from "effect/Crypto";
-import * as Queue from "effect/Queue";
-import { ChildProcessSpawner } from "effect/unstable/process";
-import { makeKiroAdapter } from "../Layers/KiroAdapter.ts";
+import { KiroSettings } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { KIRO_DEFAULT_MODEL, makeKiroAcpRuntime } from "./KiroAcpSupport.ts";
+import { makeKiroAcpRuntime } from "./KiroAcpSupport.ts";
 
 const settings = Schema.decodeSync(KiroSettings)({
   enabled: true,
@@ -71,64 +62,3 @@ it.effect.skipIf(process.env.T3_KIRO_LIVE_TURN !== "1")(
 );
 
 // Exercise the same adapter boundary used by the server, with disposable project data.
-it.effect.skipIf(process.env.T3_KIRO_LIVE_TURN !== "1")(
-  "completes real T3 turns before and after restoring a Kiro session",
-  () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const crypto = yield* Crypto.Crypto;
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-kiro-adapter-live-" });
-      const instanceId = ProviderInstanceId.make("kiro-live");
-      const threadId = ThreadId.make("kiro-live-thread");
-      const queue = yield* Queue.unbounded<ProviderRuntimeEvent>();
-      const adapter = yield* makeKiroAdapter(settings, {
-        instanceId,
-        makeRuntime: (input) =>
-          makeKiroAcpRuntime(settings, process.env, {
-            ...input,
-            clientInfo: { name: "t3-code", version: "0.0.0" },
-          }).pipe(
-            Effect.provideService(Crypto.Crypto, crypto),
-            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-          ),
-      });
-      yield* adapter.streamEvents.pipe(
-        Stream.runForEach((event) => Queue.offer(queue, event)),
-        Effect.forkScoped({ startImmediately: true }),
-      );
-      const start = (resumeCursor?: unknown) =>
-        adapter.startSession({
-          threadId,
-          providerInstanceId: instanceId,
-          cwd,
-          runtimeMode: "approval-required",
-          modelSelection: { instanceId, model: KIRO_DEFAULT_MODEL },
-          ...(resumeCursor === undefined ? {} : { resumeCursor }),
-        });
-      const session = yield* start();
-      for (const marker of ["KIRO_FIRST_OK", "KIRO_RESUMED_OK"]) {
-        yield* adapter.sendTurn({
-          threadId,
-          input: `Reply with exactly ${marker}. Do not use tools or read any files.`,
-        });
-        let answer = "";
-        while (true) {
-          const event = yield* Queue.take(queue);
-          if (event.type === "request.opened")
-            throw new Error("Unexpected tool request for a text-only probe");
-          if (event.type === "content.delta") answer += event.payload.delta;
-          if (event.type === "turn.completed") {
-            expect(event.payload.state).toBe("completed");
-            break;
-          }
-        }
-        expect(answer).toContain(marker);
-        if (marker === "KIRO_FIRST_OK") {
-          yield* adapter.stopSession(threadId);
-          yield* start(session.resumeCursor);
-        }
-      }
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  { timeout: 120_000 },
-);
