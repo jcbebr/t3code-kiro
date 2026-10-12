@@ -97,7 +97,15 @@ export const makeKiroAdapter = Effect.fn("makeKiroAdapter")(function* (
                 pinnedAgent ??= reportedAgent;
                 yield* options.onSessionStarted?.(startResult) ?? Effect.void;
                 if (modelSelection.model !== KIRO_DEFAULT_MODEL) {
-                  yield* runtime.setModel(modelSelection.model);
+                  // Kiro's v2 engine exposes legacy models; v3 advertises model config options.
+                  const hasModelConfig = startResult.sessionSetupResult.configOptions?.some(
+                    (option) => option.category === "model",
+                  );
+                  if (hasModelConfig) {
+                    yield* runtime.setModel(modelSelection.model);
+                  } else {
+                    yield* runtime.setSessionModel(modelSelection.model);
+                  }
                   return modelSelection.model;
                 }
                 return undefined;

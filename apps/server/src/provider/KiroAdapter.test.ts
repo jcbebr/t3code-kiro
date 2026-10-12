@@ -53,6 +53,7 @@ const selection = (agent?: string): ModelSelection => ({
 const makeHarness = Effect.fn("KiroTest.makeHarness")(function* (
   reportedAgent?: string,
   environment: NodeJS.ProcessEnv = {},
+  fixturePath = fixture,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-kiro-test-" });
@@ -71,7 +72,7 @@ const makeHarness = Effect.fn("KiroTest.makeHarness")(function* (
           cancelBehavior: "wait-for-prompt",
           spawn: {
             command: process.execPath,
-            args: [fixture],
+            args: [fixturePath],
             cwd: input.cwd,
             env: { T3_ACP_SESSION_LIFECYCLE: "1", ...environment },
           },
@@ -132,6 +133,74 @@ const makeHarness = Effect.fn("KiroTest.makeHarness")(function* (
     });
   return { adapter, open, requests, responses, inputs, runtimePolicy };
 });
+
+it.effect.each([
+  { engine: "v2", modern: false },
+  { engine: "v3", modern: true },
+])("selects and restores a model with the Kiro $engine engine", ({ modern }) =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness(
+      undefined,
+      {
+        T3_KIRO_MOCK_MODEL_CONFIG: modern ? "1" : "0",
+      },
+      NodeURL.fileURLToPath(new URL("../../scripts/kiro-acp-mock-agent.ts", import.meta.url)),
+    );
+    const modelSelection = { ...selection(), model: "claude-opus" };
+    const runtime = yield* h.open(modelSelection);
+    const native = yield* runtime.ensureThread({
+      threadId,
+      modelSelection,
+      runtimePolicy: h.runtimePolicy,
+    });
+    yield* runtime.close();
+    const restored = yield* h.open(modelSelection, threadId, native.nativeThreadRef!.nativeId!);
+    const providerThread = yield* restored.ensureThread({
+      threadId,
+      modelSelection,
+      runtimePolicy: h.runtimePolicy,
+    });
+    const queue = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+    yield* restored.events.pipe(
+      Stream.runForEach((event) => Queue.offer(queue, event)),
+      Effect.forkScoped({ startImmediately: true }),
+    );
+    yield* restored.startTurn(
+      makeTurnInput({
+        threadId,
+        providerThread,
+        instanceId,
+        modelSelection,
+        runtimePolicy: h.runtimePolicy,
+        now: yield* DateTime.now,
+      }),
+    );
+    let reply = "";
+    while (true) {
+      const event = yield* Queue.take(queue);
+      if (event.type === "message.updated" && event.message.role === "assistant") {
+        reply = event.message.text;
+      }
+      if (event.type === "provider_turn.updated" && event.providerTurn.status === "completed")
+        break;
+    }
+    expect(reply).toBe("claude-opus");
+    const method = modern ? "session/set_config_option" : "session/set_model";
+    const changes = h.requests.filter(
+      (event) => event.method === method && event.status === "succeeded",
+    );
+    expect(changes).toHaveLength(2);
+    expect(changes.map((event) => event.payload)).toEqual([
+      expect.objectContaining(
+        modern ? { configId: "model", value: "claude-opus" } : { modelId: "claude-opus" },
+      ),
+      expect.objectContaining(
+        modern ? { configId: "model", value: "claude-opus" } : { modelId: "claude-opus" },
+      ),
+    ]);
+    expect(h.requests.some((event) => event.status === "failed")).toBe(false);
+  }).pipe(Effect.scoped, Effect.provide(layerTest)),
+);
 
 it.effect("passes current thread MCP credentials when creating and restoring sessions", () =>
   Effect.gen(function* () {
